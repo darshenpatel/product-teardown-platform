@@ -4,6 +4,7 @@ const Anthropic = require('@anthropic-ai/sdk');
 const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
 const { ingestProductEvidence } = require('../utils/urlEvidence');
+const { hasTurnstileConfigured, verifyTurnstileToken } = require('../utils/turnstile');
 
 const router = express.Router();
 
@@ -23,12 +24,17 @@ const analysisLimit = rateLimit({
   message: { error: 'Analysis rate limit exceeded. Try again in an hour.' }
 });
 
+// Lightweight per-instance concurrency fuse (helps prevent runaway cost under bursts/bots).
+let inFlightAnalyses = 0;
+const maxInFlightAnalyses = parseInt(process.env.ANALYSIS_MAX_CONCURRENCY) || 3;
+
 // Validation schema
 const analysisSchema = Joi.object({
   productName: Joi.string().min(1).max(200).required(),
   productUrl: Joi.string().uri().optional(),
   userGoals: Joi.string().max(1000).optional(),
   aiProvider: Joi.string().valid('openai', 'anthropic').default('openai'),
+  turnstileToken: Joi.string().max(5000).optional(),
   myProduct: Joi.object({
     name: Joi.string().min(1).max(200).required(),
     url: Joi.string().uri().optional(),
@@ -40,6 +46,14 @@ const analysisSchema = Joi.object({
 router.post('/', analysisLimit, async (req, res) => {
   let aiProviderForError = 'openai';
   try {
+    if (inFlightAnalyses >= maxInFlightAnalyses) {
+      return res.status(503).json({
+        error: 'Server busy',
+        message: 'Too many analyses in progress. Please try again in a moment.'
+      });
+    }
+    inFlightAnalyses += 1;
+
     // Log incoming request data for debugging
     console.log('📥 Analysis request received:', JSON.stringify(req.body, null, 2));
 
@@ -53,8 +67,25 @@ router.post('/', analysisLimit, async (req, res) => {
       });
     }
 
-    const { productName, productUrl, userGoals, aiProvider, myProduct } = value;
+    const { productName, productUrl, userGoals, aiProvider, myProduct, turnstileToken } = value;
     aiProviderForError = aiProvider;
+
+    // Anti-abuse: require Turnstile token only when configured.
+    // This keeps local/dev and test environments frictionless.
+    if (process.env.NODE_ENV !== 'test' && hasTurnstileConfigured()) {
+      const verification = await verifyTurnstileToken({
+        token: turnstileToken,
+        remoteip: req.ip,
+      });
+      if (!verification.success) {
+        return res.status(403).json({
+          error: 'Verification failed',
+          message: 'Captcha verification failed. Please retry.',
+          // Useful for debugging configuration; not sensitive.
+          codes: verification.errorCodes,
+        });
+      }
+    }
 
     // Fail fast if provider isn't configured (avoids unnecessary URL fetching)
     if (aiProvider === 'anthropic' && !anthropic) {
@@ -175,6 +206,8 @@ router.post('/', analysisLimit, async (req, res) => {
       error: 'Analysis creation failed',
       message: error.message || 'Unable to generate analysis. Please try again.'
     });
+  } finally {
+    inFlightAnalyses = Math.max(0, inFlightAnalyses - 1);
   }
 });
 

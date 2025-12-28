@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import TurnstileWidget from './TurnstileWidget'
 
 const LAST_AI_PROVIDER_KEY = 'ptp_last_ai_provider_v1'
 const LAST_USER_GOALS_KEY = 'ptp_last_user_goals_v1'
@@ -44,6 +45,7 @@ function parseProductQuery(raw) {
 }
 
 export default function ProductInputForm({ onSubmit, error }) {
+  const turnstileSiteKey = import.meta.env.VITE_TURNSTILE_SITE_KEY
   const [query, setQuery] = useState('')
   const [showOptions, setShowOptions] = useState(false)
   const [overrideName, setOverrideName] = useState('')
@@ -56,6 +58,8 @@ export default function ProductInputForm({ onSubmit, error }) {
   const [myProductDraft, setMyProductDraft] = useState({ name: '', url: '', notes: '' })
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [validationError, setValidationError] = useState(null)
+  const [turnstileToken, setTurnstileToken] = useState(null)
+  const [turnstileWidgetKey, setTurnstileWidgetKey] = useState(0)
 
   useEffect(() => {
     try {
@@ -165,6 +169,11 @@ export default function ProductInputForm({ onSubmit, error }) {
       }
     }
 
+    if (turnstileSiteKey && !turnstileToken) {
+      setValidationError('Please complete the verification to continue.')
+      return
+    }
+
     setIsSubmitting(true)
     try {
       try {
@@ -181,6 +190,7 @@ export default function ProductInputForm({ onSubmit, error }) {
         productUrl: productUrl || undefined,
         userGoals: userGoals.trim() || undefined,
         aiProvider,
+        turnstileToken: turnstileToken || undefined,
         myProduct: myProductPayload || undefined,
       })
 
@@ -190,6 +200,11 @@ export default function ProductInputForm({ onSubmit, error }) {
       setOverrideUrl('')
     } finally {
       setIsSubmitting(false)
+      // Turnstile tokens are single-use/short-lived; reset after each attempt.
+      if (turnstileSiteKey) {
+        setTurnstileToken(null)
+        setTurnstileWidgetKey((v) => v + 1)
+      }
     }
   }
 
@@ -575,6 +590,45 @@ export default function ProductInputForm({ onSubmit, error }) {
                     <p>{validationError || error}</p>
                   </div>
                 </div>
+              </div>
+            </div>
+          )}
+
+          {turnstileSiteKey && (
+            <div className="ptp-card p-4 bg-zinc-50 border border-zinc-200/70">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <div className="text-sm font-medium text-zinc-800">
+                    Verification
+                  </div>
+                  <div className="mt-1 text-xs text-zinc-500">
+                    Helps prevent automated abuse of the analysis API.
+                  </div>
+                </div>
+                {turnstileToken ? (
+                  <span className="ptp-pill bg-emerald-50 text-emerald-800 border-emerald-200">
+                    Verified
+                  </span>
+                ) : (
+                  <span className="ptp-pill bg-zinc-50 text-zinc-700 border-zinc-200/70">
+                    Required
+                  </span>
+                )}
+              </div>
+
+              <div className="mt-3">
+                <TurnstileWidget
+                  key={turnstileWidgetKey}
+                  siteKey={turnstileSiteKey}
+                  onToken={(token) => {
+                    setTurnstileToken(token)
+                    setValidationError(null)
+                  }}
+                  onError={(message) => {
+                    setTurnstileToken(null)
+                    if (message) setValidationError(message)
+                  }}
+                />
               </div>
             </div>
           )}

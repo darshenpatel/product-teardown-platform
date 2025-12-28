@@ -15,6 +15,10 @@ const { hasValidOpenAI, hasValidAnthropic } = validationResults;
 const app = express();
 const PORT = process.env.PORT || 3001;
 
+// Trust the first proxy (Render/Cloudflare) so req.ip and rate limiting work correctly in production.
+// Without this, all traffic can appear to come from the proxy and break per-IP abuse protection.
+app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet());
 

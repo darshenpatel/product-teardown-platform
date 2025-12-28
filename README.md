@@ -71,6 +71,11 @@ ANTHROPIC_API_KEY=your-anthropic-api-key-here
 # RATE_LIMIT_MAX_REQUESTS=100          # Max requests per window
 # ANALYSIS_RATE_LIMIT_WINDOW_MS=3600000 # 1 hour in milliseconds  
 # ANALYSIS_RATE_LIMIT_MAX_REQUESTS=10   # Max analysis requests per window
+
+# Optional: Lightweight anti-abuse (recommended for public deployments)
+# TURNSTILE_SECRET_KEY=your-cloudflare-turnstile-secret-key
+# TURNSTILE_TIMEOUT_MS=5000            # verify timeout (ms)
+# ANALYSIS_MAX_CONCURRENCY=3           # per-instance concurrency fuse
 ```
 
 ### 3. Frontend Setup
@@ -81,6 +86,9 @@ npm install
 # Optional: Set custom API URL (defaults to http://localhost:3001)
 # Create .env.local for custom configuration
 echo "VITE_API_URL=http://localhost:3001" > .env.local
+
+# Optional: Enable Cloudflare Turnstile (CAPTCHA) in the UI
+# echo "VITE_TURNSTILE_SITE_KEY=your-cloudflare-turnstile-site-key" >> .env.local
 ```
 
 ### 4. Start Development Servers
