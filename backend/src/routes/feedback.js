@@ -1,6 +1,7 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
+const fileStore = require('../utils/fileStore');
 
 const router = express.Router();
 
@@ -18,6 +19,22 @@ const feedbackSchema = Joi.object({
   context: Joi.object().unknown(true).optional()
 });
 
+router.get('/', async (req, res) => {
+  try {
+    const feedback = await fileStore.list('feedback');
+    return res.json({
+      success: true,
+      data: feedback,
+    });
+  } catch (err) {
+    console.error('Failed to list feedback:', err);
+    return res.status(500).json({
+      error: 'Failed to list feedback',
+      message: err.message || 'Unable to load feedback right now.'
+    });
+  }
+});
+
 // POST /api/feedback - Receive feedback on an analysis
 router.post('/', feedbackLimit, async (req, res) => {
   try {
@@ -29,14 +46,23 @@ router.post('/', feedbackLimit, async (req, res) => {
       });
     }
 
-    // MVP: log feedback and return success. Later: persist to DB / analytics pipeline.
-    console.log('📝 Feedback received:', JSON.stringify({
-      ...value,
-      receivedAt: new Date().toISOString()
-    }, null, 2));
+    const savedFeedback = {
+      id: `fb_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`,
+      analysisId: value.analysisId,
+      productName: value.productName,
+      rating: value.rating,
+      comment: value.comment || '',
+      context: value.context || {},
+      created_at: new Date().toISOString(),
+    };
+
+    await fileStore.save('feedback', savedFeedback);
+
+    console.log('📝 Feedback received:', JSON.stringify(savedFeedback, null, 2));
 
     return res.status(201).json({
-      success: true
+      success: true,
+      data: savedFeedback,
     });
   } catch (err) {
     console.error('Feedback submission failed:', err);
@@ -48,5 +74,4 @@ router.post('/', feedbackLimit, async (req, res) => {
 });
 
 module.exports = router;
-
 

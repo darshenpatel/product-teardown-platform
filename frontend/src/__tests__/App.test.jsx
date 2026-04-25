@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import App from '../App'
 
 // Mock the components to avoid complex dependencies
@@ -26,23 +26,46 @@ vi.mock('../components/LoadingState', () => ({
 }))
 
 describe('App', () => {
-  it('renders the main header', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true, data: [] }),
+    }))
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('renders the main header', async () => {
     render(<App />)
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1)
+    })
     
     expect(screen.getByText('Product Teardown Platform')).toBeInTheDocument()
     expect(screen.getByText(/ai-powered competitive analysis/i)).toBeInTheDocument()
   })
 
-  it('shows ProductInputForm by default', () => {
+  it('shows ProductInputForm by default', async () => {
     render(<App />)
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1)
+    })
     
     expect(screen.getByTestId('product-input-form')).toBeInTheDocument()
     expect(screen.queryByTestId('analysis-display')).not.toBeInTheDocument()
     expect(screen.queryByTestId('loading-state')).not.toBeInTheDocument()
   })
 
-  it('has proper CSS classes for styling', () => {
+  it('has proper CSS classes for styling', async () => {
     const { container } = render(<App />)
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledTimes(1)
+    })
     
     const mainDiv = container.firstChild
     expect(mainDiv).toHaveClass('ptp-page')

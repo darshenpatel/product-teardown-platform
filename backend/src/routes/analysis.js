@@ -5,8 +5,18 @@ const rateLimit = require('express-rate-limit');
 const Joi = require('joi');
 const { ingestProductEvidence } = require('../utils/urlEvidence');
 const { hasTurnstileConfigured, verifyTurnstileToken } = require('../utils/turnstile');
+const fileStore = require('../utils/fileStore');
 
 const router = express.Router();
+const MISSING_SECTION_TEXT = 'Analysis not available for this section.';
+const SECTION_ORDER = [
+  ['onboarding', 'User Onboarding'],
+  ['pricing', 'Pricing Strategy'],
+  ['valueProps', 'Value Propositions'],
+  ['competitive', 'Competitive Differentiation'],
+  ['actionPlan', 'Action Plan / Next Steps'],
+  ['deltaVsMyProduct', 'Delta vs My product'],
+];
 
 // Initialize AI clients
 const openai = process.env.OPENAI_API_KEY ? new OpenAI({
@@ -40,6 +50,45 @@ const analysisSchema = Joi.object({
     url: Joi.string().uri().optional(),
     notes: Joi.string().max(2000).optional(),
   }).optional(),
+});
+
+const persistedAnalysisSchema = Joi.object({
+  id: Joi.string().min(1).max(200).required(),
+  product_name: Joi.string().min(1).max(200).required(),
+  product_url: Joi.string().uri().allow('', null).optional(),
+  my_product: Joi.object({
+    name: Joi.string().min(1).max(200).required(),
+    url: Joi.string().uri().allow('', null).optional(),
+    notes: Joi.string().max(2000).allow('', null).optional(),
+  }).allow(null).optional(),
+  user_goals: Joi.string().max(1000).allow('', null).optional(),
+  ai_provider: Joi.string().valid('openai', 'anthropic').required(),
+  analysis_data: Joi.object({
+    sections: Joi.object().required(),
+    evidence: Joi.object().required(),
+    sources: Joi.array().required(),
+    rawAnalysis: Joi.string().required(),
+    generatedAt: Joi.string().required(),
+    originalSections: Joi.object().optional(),
+    edits: Joi.object().optional(),
+  }).required(),
+  created_at: Joi.string().required(),
+}).required();
+
+router.get('/', async (req, res) => {
+  try {
+    const analyses = await fileStore.list('analyses');
+    return res.json({
+      success: true,
+      data: analyses,
+    });
+  } catch (error) {
+    console.error('Failed to list analyses:', error);
+    return res.status(500).json({
+      error: 'Failed to list analyses',
+      message: error.message || 'Unable to load saved analyses.',
+    });
+  }
 });
 
 // POST /api/analysis - Create new analysis
@@ -113,13 +162,14 @@ router.post('/', analysisLimit, async (req, res) => {
 
     // Call AI provider
     let analysisText;
+    const expectsDeltaSection = Boolean(myProduct && myProduct.name);
     
     if (aiProvider === 'anthropic') {
       const response = await anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
         max_tokens: 2000,
         temperature: 0.3,
-        system: "You are a product analysis expert with deep knowledge of software products and business models. You MUST provide specific, detailed analysis about the exact product requested - never generic frameworks or instructional content. Base your analysis on actual product knowledge and make reasonable inferences when needed. If evidence sources are provided, use them as grounding context and add citations like [src_1] when referencing them. Format your response with clear markdown headers and bullet points for SWOT analysis.",
+        system: "You are a product analysis expert with deep knowledge of software products and business models. You MUST provide specific, detailed analysis about the exact product requested - never generic frameworks or instructional content. Base your analysis on actual product knowledge and make reasonable inferences when needed. If evidence sources are provided, use them as grounding context and add citations like [src_1] when referencing them. Return ONLY valid JSON that matches the requested schema.",
         messages: [
           {
             role: "user",
@@ -135,7 +185,7 @@ router.post('/', analysisLimit, async (req, res) => {
         messages: [
           {
             role: "system",
-            content: "You are a product analysis expert with deep knowledge of software products and business models. You MUST provide specific, detailed analysis about the exact product requested - never generic frameworks or instructional content. Base your analysis on actual product knowledge and make reasonable inferences when needed. If evidence sources are provided, use them as grounding context and add citations like [src_1] when referencing them. Format your response with clear markdown headers and bullet points for SWOT analysis."
+            content: "You are a product analysis expert with deep knowledge of software products and business models. You MUST provide specific, detailed analysis about the exact product requested - never generic frameworks or instructional content. Base your analysis on actual product knowledge and make reasonable inferences when needed. If evidence sources are provided, use them as grounding context and add citations like [src_1] when referencing them. Return ONLY valid JSON that matches the requested schema."
           },
           {
             role: "user",
@@ -149,21 +199,28 @@ router.post('/', analysisLimit, async (req, res) => {
     }
     
     // Parse response into structured sections
-    const structuredAnalysis = parseAnalysisResponse(analysisText, evidence.sources, evidence.limitations);
+    const structuredAnalysis = parseAnalysisResponse(analysisText, {
+      sources: evidence.sources,
+      evidenceLimitations: evidence.limitations,
+      expectsDeltaSection,
+    });
 
-    // For MVP, we'll return the analysis directly without database storage
+    const persistedAnalysis = {
+      id: generateId(),
+      product_name: productName,
+      product_url: productUrl,
+      my_product: myProduct,
+      user_goals: userGoals,
+      ai_provider: aiProvider,
+      analysis_data: structuredAnalysis,
+      created_at: new Date().toISOString()
+    };
+
+    await fileStore.save('analyses', persistedAnalysis);
+
     res.status(201).json({
       success: true,
-      data: {
-        id: generateId(),
-        product_name: productName,
-        product_url: productUrl,
-        my_product: myProduct,
-        user_goals: userGoals,
-        ai_provider: aiProvider,
-        analysis_data: structuredAnalysis,
-        created_at: new Date().toISOString()
-      }
+      data: persistedAnalysis
     });
 
   } catch (error) {
@@ -211,6 +268,78 @@ router.post('/', analysisLimit, async (req, res) => {
   }
 });
 
+router.put('/:id', async (req, res) => {
+  try {
+    const existing = await fileStore.findById('analyses', req.params.id);
+    if (!existing) {
+      return res.status(404).json({
+        error: 'Analysis not found',
+        message: 'The requested analysis could not be found.',
+      });
+    }
+
+    const candidate = {
+      ...req.body,
+      id: req.params.id,
+    };
+
+    const { error, value } = persistedAnalysisSchema.validate(candidate);
+    if (error) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        details: error.details.map((detail) => detail.message),
+      });
+    }
+
+    await fileStore.save('analyses', value);
+
+    return res.json({
+      success: true,
+      data: value,
+    });
+  } catch (error) {
+    console.error('Failed to update analysis:', error);
+    return res.status(500).json({
+      error: 'Failed to update analysis',
+      message: error.message || 'Unable to update analysis right now.',
+    });
+  }
+});
+
+router.delete('/:id', async (req, res) => {
+  try {
+    const existing = await fileStore.findById('analyses', req.params.id);
+    if (!existing) {
+      return res.status(404).json({
+        error: 'Analysis not found',
+        message: 'The requested analysis could not be found.',
+      });
+    }
+
+    await fileStore.remove('analyses', req.params.id);
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to delete analysis:', error);
+    return res.status(500).json({
+      error: 'Failed to delete analysis',
+      message: error.message || 'Unable to delete analysis right now.',
+    });
+  }
+});
+
+router.delete('/', async (req, res) => {
+  try {
+    await fileStore.clear('analyses');
+    return res.json({ success: true });
+  } catch (error) {
+    console.error('Failed to clear analyses:', error);
+    return res.status(500).json({
+      error: 'Failed to clear analyses',
+      message: error.message || 'Unable to clear analyses right now.',
+    });
+  }
+});
+
 // Helper functions
 function buildAnalysisPrompt(productName, productUrl, userGoals, evidenceContextForPrompt, myProduct) {
   let prompt = `You are analyzing the specific product "${productName}"`;
@@ -228,6 +357,10 @@ function buildAnalysisPrompt(productName, productUrl, userGoals, evidenceContext
 - DO NOT say things like "To analyze..." or "Framework to apply..." or "I'd recommend visiting..."
 - You MUST base your analysis on actual knowledge of ${productName}
 - If you don't have specific information, make reasonable inferences based on typical patterns for similar products
+- Return ONLY valid JSON
+- Do NOT wrap the JSON in markdown fences
+- Each section value must be a markdown string with scannable bullets/subheadings
+- Keep inline citations like [src_1] inside the markdown strings when evidence supports a claim
 
 Provide detailed analysis in exactly these ${totalSections} sections:
 
@@ -311,29 +444,216 @@ Provide detailed analysis in exactly these ${totalSections} sections:
     prompt += `\n\nEVIDENCE NOTE:\n- No external evidence sources were available. If you make inferences, be explicit that they are inferred (not directly sourced).`;
   }
 
-  prompt += `\n\nRemember: Provide SPECIFIC analysis about ${productName}, not generic business frameworks or instructions.\nIf you reference evidence sources, add citations like [src_1].`;
+  prompt += `\n\nReturn JSON in exactly this shape:
+{
+  "sections": {
+    "onboarding": "markdown string",
+    "pricing": "markdown string",
+    "valueProps": "markdown string",
+    "competitive": "markdown string",
+    "actionPlan": "markdown string",${hasMyProduct ? '\n    "deltaVsMyProduct": "markdown string"' : '\n    "deltaVsMyProduct": ""'}
+  }
+}
+
+Rules for the JSON:
+- Include all keys exactly as shown above
+- Use an empty string for deltaVsMyProduct only when no comparison baseline exists
+- Do not include extra top-level keys
+- Do not include explanatory text before or after the JSON
+
+Remember: Provide SPECIFIC analysis about ${productName}, not generic business frameworks or instructions.\nIf you reference evidence sources, add citations like [src_1].`;
   
   return prompt;
 }
 
-function parseAnalysisResponse(analysisText, sources = [], evidenceLimitations = []) {
-  // Enhanced parsing for structured markdown responses
+function parseAnalysisResponse(analysisText, options = {}) {
+  const {
+    sources = [],
+    evidenceLimitations = [],
+    expectsDeltaSection = false,
+  } = options;
+
+  const structuredSections = parseStructuredSections(analysisText, expectsDeltaSection);
+  const usedStructuredSections = Boolean(structuredSections);
+  const sections = structuredSections || extractSectionsFromMarkdown(analysisText, expectsDeltaSection);
+
+  return {
+    sections,
+    evidence: buildEvidenceMeta(sections, sources, evidenceLimitations),
+    sources,
+    rawAnalysis: usedStructuredSections
+      ? buildRawAnalysisFromSections(sections, expectsDeltaSection)
+      : analysisText,
+    generatedAt: new Date().toISOString()
+  };
+}
+
+function parseStructuredSections(text, expectsDeltaSection) {
+  const jsonCandidate = extractJsonCandidate(text);
+  if (!jsonCandidate) return null;
+
+  try {
+    const parsed = JSON.parse(jsonCandidate);
+    const sectionContainer = parsed?.sections && typeof parsed.sections === 'object'
+      ? parsed.sections
+      : parsed;
+
+    if (!sectionContainer || typeof sectionContainer !== 'object' || Array.isArray(sectionContainer)) {
+      return null;
+    }
+
+    const normalized = normalizeSections(sectionContainer, expectsDeltaSection);
+    const requiredKeys = ['onboarding', 'pricing', 'valueProps', 'competitive', 'actionPlan'];
+    const hasAllRequiredSections = requiredKeys.every((key) => normalized[key] !== MISSING_SECTION_TEXT);
+
+    return hasAllRequiredSections ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+function extractJsonCandidate(text) {
+  const trimmed = String(text || '').trim();
+  if (!trimmed) return null;
+
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    return trimmed;
+  }
+
+  const fencedMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fencedMatch && fencedMatch[1]) {
+    const fenced = fencedMatch[1].trim();
+    if (fenced.startsWith('{') && fenced.endsWith('}')) {
+      return fenced;
+    }
+  }
+
+  return extractBalancedJsonObject(trimmed);
+}
+
+function extractBalancedJsonObject(text) {
+  let start = -1;
+  let depth = 0;
+  let inString = false;
+  let escapeNext = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+
+    if (escapeNext) {
+      escapeNext = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escapeNext = true;
+      continue;
+    }
+
+    if (char === '"') {
+      inString = !inString;
+      continue;
+    }
+
+    if (inString) {
+      continue;
+    }
+
+    if (char === '{') {
+      if (depth === 0) start = i;
+      depth += 1;
+      continue;
+    }
+
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0 && start !== -1) {
+        return text.slice(start, i + 1);
+      }
+    }
+  }
+
+  return null;
+}
+
+function normalizeSections(rawSections, expectsDeltaSection) {
+  const normalized = {};
+
+  for (const [key] of SECTION_ORDER) {
+    const rawValue = rawSections?.[key];
+    const normalizedValue = normalizeSectionValue(rawValue);
+
+    if (key === 'deltaVsMyProduct' && !expectsDeltaSection) {
+      normalized[key] = normalizedValue || MISSING_SECTION_TEXT;
+      continue;
+    }
+
+    normalized[key] = normalizedValue || MISSING_SECTION_TEXT;
+  }
+
+  return normalized;
+}
+
+function normalizeSectionValue(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || '';
+  }
+
+  if (Array.isArray(value)) {
+    const items = value
+      .map(item => normalizeSectionValue(item))
+      .filter(Boolean);
+
+    if (items.length === 0) return '';
+    return items.map(item => (item.startsWith('- ') ? item : `- ${item}`)).join('\n');
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.entries(value)
+      .map(([label, itemValue]) => {
+        const normalizedItem = normalizeSectionValue(itemValue);
+        return normalizedItem
+          ? `**${humanizeKey(label)}**\n${normalizedItem}`
+          : '';
+      })
+      .filter(Boolean)
+      .join('\n\n')
+      .trim();
+  }
+
+  return '';
+}
+
+function humanizeKey(key) {
+  return String(key || '')
+    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim()
+    .replace(/\b\w/g, (match) => match.toUpperCase());
+}
+
+function extractSectionsFromMarkdown(analysisText, expectsDeltaSection) {
   const sections = {
     onboarding: extractSection(analysisText, ['onboarding', 'user onboarding']),
     pricing: extractSection(analysisText, ['pricing', 'pricing strategy']),
     valueProps: extractSection(analysisText, ['value proposition', 'value prop']),
     competitive: extractSection(analysisText, ['competitive', 'competitive analysis', 'differentiation']),
     actionPlan: extractSection(analysisText, ['action plan', 'next steps']),
-    deltaVsMyProduct: extractSection(analysisText, ['delta vs my product', 'delta vs myproduct', 'delta vs my-product'])
+    deltaVsMyProduct: expectsDeltaSection
+      ? extractSection(analysisText, ['delta vs my product', 'delta vs myproduct', 'delta vs my-product'])
+      : MISSING_SECTION_TEXT,
   };
 
-  return {
-    sections,
-    evidence: buildEvidenceMeta(sections, sources, evidenceLimitations),
-    sources,
-    rawAnalysis: analysisText,
-    generatedAt: new Date().toISOString()
-  };
+  return sections;
+}
+
+function buildRawAnalysisFromSections(sections, expectsDeltaSection) {
+  return SECTION_ORDER
+    .filter(([key]) => expectsDeltaSection || key !== 'deltaVsMyProduct')
+    .map(([key, label], index) => `## ${index + 1}. ${label}\n${sections?.[key] || MISSING_SECTION_TEXT}`)
+    .join('\n\n')
+    .trim();
 }
 
 function buildEvidenceMeta(sections, sources = [], evidenceLimitations = []) {
@@ -440,7 +760,7 @@ function extractSection(text, keywords) {
   }
   
   if (sectionStartIndex === -1) {
-    return 'Analysis not available for this section.';
+    return MISSING_SECTION_TEXT;
   }
   
   // Collect lines from section start until next section
@@ -502,7 +822,7 @@ function extractSection(text, keywords) {
     }
   }
   
-  return result || 'Analysis not available for this section.';
+  return result || MISSING_SECTION_TEXT;
 }
 
 function generateId() {
@@ -510,3 +830,10 @@ function generateId() {
 }
 
 module.exports = router;
+module.exports.__test__ = {
+  parseAnalysisResponse,
+  parseStructuredSections,
+  extractJsonCandidate,
+  extractSectionsFromMarkdown,
+  buildRawAnalysisFromSections,
+};

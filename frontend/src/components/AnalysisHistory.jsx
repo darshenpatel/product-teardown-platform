@@ -87,7 +87,7 @@ export default function AnalysisHistory({
           <div>
             <h2 className="text-2xl font-bold text-gray-900">Analysis History</h2>
             <p className="text-sm text-gray-600 mt-1">
-              Saved locally in your browser. Select 2–3 to compare.
+              Saved to the backend when available and mirrored locally for fallback. Select 2–3 to compare.
             </p>
           </div>
 
@@ -216,5 +216,4 @@ export default function AnalysisHistory({
     </div>
   )
 }
-
 

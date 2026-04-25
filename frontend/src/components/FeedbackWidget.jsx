@@ -79,14 +79,9 @@ export default function FeedbackWidget({ analysis }) {
 
     setSubmitting(true)
     try {
-      const existing = readLocalFeedback()
-      const next = [payload, ...existing].slice(0, FEEDBACK_LIMIT)
-      writeLocalFeedback(next)
-
-      // Best-effort send to backend (no UI blocking if it fails)
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001'
       try {
-        await fetch(`${apiUrl}/api/feedback`, {
+        const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+        const response = await fetch(`${apiUrl}/api/feedback`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -97,8 +92,20 @@ export default function FeedbackWidget({ analysis }) {
             context: payload.context,
           })
         })
+
+        if (!response.ok) {
+          throw new Error('Backend feedback persistence failed.')
+        }
+
+        const result = await response.json()
+        const savedFeedback = result?.data || payload
+        const existing = readLocalFeedback()
+        const next = [savedFeedback, ...existing].slice(0, FEEDBACK_LIMIT)
+        writeLocalFeedback(next)
       } catch {
-        // ignore network errors
+        const existing = readLocalFeedback()
+        const next = [payload, ...existing].slice(0, FEEDBACK_LIMIT)
+        writeLocalFeedback(next)
       }
 
       setSubmitted(true)
@@ -219,5 +226,4 @@ export default function FeedbackWidget({ analysis }) {
     </div>
   )
 }
-
 

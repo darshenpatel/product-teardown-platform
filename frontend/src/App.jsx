@@ -9,6 +9,27 @@ import './App.css'
 
 const HISTORY_STORAGE_KEY = 'ptp_analysis_history_v1'
 const HISTORY_LIMIT = 20
+const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001'
+
+function readLocalHistory() {
+  try {
+    const raw = localStorage.getItem(HISTORY_STORAGE_KEY)
+    if (!raw) return []
+    const parsed = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed : []
+  } catch (err) {
+    console.warn('Failed to load history:', err)
+    return []
+  }
+}
+
+function writeLocalHistory(items) {
+  try {
+    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(items))
+  } catch (err) {
+    console.warn('Failed to persist history:', err)
+  }
+}
 
 function App() {
   const [analysis, setAnalysis] = useState(null)
@@ -20,15 +41,32 @@ function App() {
   const [paletteOpen, setPaletteOpen] = useState(false)
 
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(HISTORY_STORAGE_KEY)
-      if (!raw) return
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) {
-        setHistory(parsed)
+    let mounted = true
+
+    const loadHistory = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/api/analysis`)
+        if (!response.ok) {
+          throw new Error('Failed to load saved analyses from the backend.')
+        }
+
+        const result = await response.json()
+        const items = Array.isArray(result?.data) ? result.data.slice(0, HISTORY_LIMIT) : []
+        if (!mounted) return
+
+        setHistory(items)
+        writeLocalHistory(items)
+      } catch {
+        if (!mounted) return
+        const localHistory = readLocalHistory()
+        setHistory(localHistory.slice(0, HISTORY_LIMIT))
       }
-    } catch (err) {
-      console.warn('Failed to load history:', err)
+    }
+
+    loadHistory()
+
+    return () => {
+      mounted = false
     }
   }, [])
 
@@ -46,14 +84,10 @@ function App() {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [])
 
-  const persistHistory = (updater) => {
+  const persistHistoryLocal = (updater) => {
     setHistory((prev) => {
-      const next = updater(prev)
-      try {
-        localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(next))
-      } catch (err) {
-        console.warn('Failed to persist history:', err)
-      }
+      const next = updater(prev).slice(0, HISTORY_LIMIT)
+      writeLocalHistory(next)
       return next
     })
   }
@@ -75,7 +109,7 @@ function App() {
         if (value && typeof value === 'object') {
           const entries = Object.entries(value)
             .map(([k, v]) => [k, cleanValue(v)])
-            .filter(([_, v]) => {
+            .filter(([, v]) => {
               if (v === '' || v === null || v === undefined) return false
               if (typeof v === 'object' && !Array.isArray(v) && Object.keys(v).length === 0) return false
               return true
@@ -88,8 +122,7 @@ function App() {
 
       const cleanedData = cleanValue(productData)
 
-      const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:3001'
-      const response = await fetch(`${apiUrl}/api/analysis`, {
+      const response = await fetch(`${API_BASE_URL}/api/analysis`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -107,9 +140,8 @@ function App() {
       setAnalysis(analysisData)
       setView('new') // keep consistent navigation; analysis is shown when present
 
-      // Save to local history for later comparison
       if (analysisData?.id) {
-        persistHistory((prev) => {
+        persistHistoryLocal((prev) => {
           const deduped = prev.filter(item => item.id !== analysisData.id)
           return [analysisData, ...deduped].slice(0, HISTORY_LIMIT)
         })
@@ -141,23 +173,69 @@ function App() {
     setView('new')
   }
 
-  const handleUpdateAnalysis = (updated) => {
+  const handleUpdateAnalysis = async (updated) => {
     setAnalysis(updated)
-    if (updated?.id) {
-      persistHistory((prev) => {
-        const hasExisting = prev.some(item => item.id === updated.id)
-        if (!hasExisting) return [updated, ...prev].slice(0, HISTORY_LIMIT)
-        return prev.map(item => item.id === updated.id ? updated : item)
+    if (!updated?.id) return
+
+    persistHistoryLocal((prev) => {
+      const hasExisting = prev.some(item => item.id === updated.id)
+      if (!hasExisting) return [updated, ...prev]
+      return prev.map(item => item.id === updated.id ? updated : item)
+    })
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/analysis/${updated.id}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(updated),
       })
+
+      if (!response.ok) {
+        throw new Error('Failed to save analysis edits.')
+      }
+
+      const result = await response.json()
+      const savedAnalysis = result?.data || updated
+
+      setAnalysis(savedAnalysis)
+      persistHistoryLocal((prev) => prev.map(item => item.id === savedAnalysis.id ? savedAnalysis : item))
+    } catch (err) {
+      console.warn('Failed to persist analysis edits to backend:', err)
     }
   }
 
-  const handleDeleteFromHistory = (id) => {
-    persistHistory((prev) => prev.filter(item => item.id !== id))
+  const handleDeleteFromHistory = async (id) => {
+    persistHistoryLocal((prev) => prev.filter(item => item.id !== id))
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/analysis/${id}`, {
+        method: 'DELETE',
+      })
+
+      if (!response.ok && response.status !== 404) {
+        throw new Error('Failed to delete saved analysis.')
+      }
+    } catch (err) {
+      console.warn('Failed to delete analysis from backend:', err)
+    }
   }
 
-  const handleClearHistory = () => {
-    persistHistory(() => [])
+  const handleClearHistory = async () => {
+    persistHistoryLocal(() => [])
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/analysis`, {
+        method: 'DELETE',
+      })
+
+      if (!response.ok) {
+        throw new Error('Failed to clear saved analyses.')
+      }
+    } catch (err) {
+      console.warn('Failed to clear analyses from backend:', err)
+    }
   }
 
   const handleCompare = (selectedAnalyses) => {

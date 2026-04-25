@@ -1,128 +1,79 @@
 # Tech Stack Overview - Product Teardown Platform
 
-## Frontend Stack
-### Framework: React 18+
-- **Why**: Fast development, component reusability, large ecosystem
-- **Key Libraries**:
-  - `create-react-app` or `Vite` for quick setup
-  - `react-router-dom` for navigation
-  - `axios` for API calls
-  - `react-hook-form` for form handling
-  - `lucide-react` for icons
+## Current Architecture
 
-### Styling
-- **CSS Framework**: Tailwind CSS
-- **Why**: Utility-first, fast styling, consistent design system
-- **Component Library**: Headless UI (for accessibility)
+The shipped app is a two-part Node/React codebase:
 
-### State Management
-- **Initial**: React built-in hooks (useState, useContext)
-- **Future**: Zustand or Redux Toolkit if complexity grows
+- `backend/` serves the API with Express.
+- `frontend/` renders the product experience with React and Vite.
+- There is no Python analysis service and no Supabase integration in the current implementation.
 
-## Backend Stack
-### Runtime: Node.js with Python Services
-- **API Server**: Express.js (Node.js) for main API
-- **AI Analysis**: Python services for model integration
-- **Why**: Leverage Python's AI ecosystem while keeping API familiar
+## Frontend
 
-### AI/ML Integration
-- **Primary**: OpenAI GPT-4 or Claude API
-- **Backup**: Local models (Ollama) for cost optimization
-- **Custom Prompts**: Structured templates for consistent analysis
+- React 19.
+- Vite for development, build, and preview.
+- Tailwind CSS for layout and component styling.
+- React Markdown for rendering teardown content.
+- Headless UI for the command palette.
+- Browser `localStorage` for saved preferences, the "My product" baseline, and a local mirror of persisted history/feedback.
 
-## Database & Backend Services
-### Database: Supabase (PostgreSQL)
-- **Why**: 
-  - Instant APIs and real-time subscriptions
-  - Built-in authentication
-  - File storage capabilities
-  - Great developer experience
+## Backend
 
-### Tables Structure (Initial)
-```sql
--- Users table (handled by Supabase Auth)
--- analyses table
-CREATE TABLE analyses (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES auth.users(id),
-  product_name TEXT NOT NULL,
-  product_url TEXT,
-  user_goals TEXT,
-  analysis_data JSONB,
-  created_at TIMESTAMP DEFAULT NOW()
-);
-```
+- Express for HTTP routing.
+- OpenAI SDK and Anthropic SDK for model calls.
+- Joi for request validation.
+- Helmet for security headers.
+- CORS for browser access from the Vite dev server.
+- express-rate-limit for general and analysis-specific throttling.
+- Axios for evidence fetching and Turnstile verification.
+- Lightweight file-backed persistence for analyses and feedback.
 
-## Development Tools
-### Code Editor: Cursor with Claude Code
-- Integrated AI assistance for faster development
-- Intelligent code completion and refactoring
+## Product Flow
 
-### Version Control: Git + GitHub
-- Feature branch workflow
-- Automated deployments via GitHub Actions
+1. The user submits a product name or URL.
+2. The frontend normalizes the input and sends `POST /api/analysis`.
+3. The backend validates the payload and checks provider availability.
+4. If a URL is present, the backend attempts constrained evidence ingestion from the product site and related pages.
+5. The selected model is prompted to return structured JSON whose section values are markdown strings.
+6. The backend prefers structured JSON parsing, then falls back to markdown section extraction if the model output is malformed.
+7. The backend persists analyses in a lightweight file store, and the frontend renders the teardown, mirrors it locally, and allows editing and comparison.
 
-### Package Management
-- **Frontend**: npm or yarn
-- **Backend**: npm for Node.js, pip for Python
+## Evidence and Trust
 
-## Deployment & Infrastructure
-### Hosting: Vercel (Frontend) + Railway (Backend)
-- **Frontend**: Vercel for React app (automatic deployments)
-- **Backend**: Railway for Express API and Python services
-- **Database**: Supabase hosted PostgreSQL
+- Evidence ingestion is intentionally constrained to the same origin and a small set of common pages.
+- Sources are surfaced in the UI with ids, snippets, and links.
+- Each section is tagged with a coarse evidence basis and confidence score.
+- Citations are only accepted when they match fetched source ids.
 
-### Environment Management
-```bash
-# Frontend (.env.local)
-REACT_APP_API_URL=http://localhost:3001
-REACT_APP_SUPABASE_URL=your-supabase-url
-REACT_APP_SUPABASE_ANON_KEY=your-anon-key
+## Anti-Abuse
 
-# Backend (.env)
-OPENAI_API_KEY=your-openai-key
-SUPABASE_URL=your-supabase-url
-SUPABASE_SERVICE_KEY=your-service-key
-PORT=3001
-```
+- General request rate limiting is enabled at the app level.
+- Analysis requests have a separate hourly limit.
+- Optional Cloudflare Turnstile can be enabled in both backend and frontend.
+- A lightweight concurrency fuse prevents too many analyses from running at once.
 
-## API Architecture
-### RESTful Endpoints
-```
-POST /api/analyze
-GET  /api/analyses/:id
-GET  /api/analyses (user's analyses)
-DELETE /api/analyses/:id
-```
+## Current Limits
 
-### Analysis Flow
-1. User submits product data via frontend
-2. Express API receives request, validates input
-3. Python service called for AI analysis
-4. Results stored in Supabase
-5. Frontend displays structured output
+- No database-backed persistence layer yet.
+- No auth.
+- No server-side analytics warehouse.
+- No streaming response pipeline.
+- No structured database schema for analyses yet.
 
-## Development Phases
-### Phase 1: MVP (Week 1-2)
-- Basic React form
-- Simple Express API
-- OpenAI integration
-- Static analysis display
+## Current Scripts
 
-### Phase 2: Enhancement (Week 3-4)
-- Supabase integration
-- User authentication
-- Analysis history
-- Improved UI/UX
+Backend:
 
-### Phase 3: Optimization (Week 5+)
-- Performance improvements
-- Advanced features
-- User feedback integration
-- Production optimizations
+- `npm start`
+- `npm run dev`
+- `npm test`
+- `npm run test:watch`
 
-## Performance Considerations
-- **Frontend**: Code splitting, lazy loading
-- **Backend**: API rate limiting, caching strategies
-- **AI**: Prompt optimization, response streaming
-- **Database**: Proper indexing, query optimization
+Frontend:
+
+- `npm run dev`
+- `npm run build`
+- `npm run preview`
+- `npm run lint`
+- `npm run test`
+- `npm run test:ui`

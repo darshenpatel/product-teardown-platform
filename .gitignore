@@ -6,6 +6,7 @@
 **/dist-ssr/
 **/.vite/
 **/coverage/
+backend/data/
 
 # Environment / secrets (never commit real keys)
 **/.env
@@ -38,5 +39,4 @@ lerna-debug.log*
 
 # Local env variants sometimes created by tooling
 *.local
-
 
