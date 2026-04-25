@@ -266,18 +266,18 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
                 )}
 
                 {displayContent ? (
-                  <ReactMarkdown
-                    components={{
-                      h2: ({node, ...props}) => <h2 className="text-xl font-semibold text-gray-900 mt-6 mb-4" {...props} />,
-                      h3: ({node, ...props}) => <h3 className="text-lg font-semibold text-gray-900 mt-4 mb-3" {...props} />,
-                      h4: ({node, ...props}) => <h4 className="text-base font-semibold text-gray-900 mt-3 mb-2" {...props} />,
-                      p: ({node, ...props}) => <p className="text-gray-700 leading-relaxed mb-3" {...props} />,
-                      strong: ({node, ...props}) => <strong className="font-semibold text-gray-900" {...props} />,
-                      em: ({node, ...props}) => <em className="italic text-gray-800" {...props} />,
-                      ul: ({node, ...props}) => <ul className="list-disc ml-6 space-y-2 mb-4" {...props} />,
-                      ol: ({node, ...props}) => <ol className="list-decimal ml-6 space-y-2 mb-4" {...props} />,
-                      li: ({node, ...props}) => <li className="text-gray-700 leading-relaxed" {...props} />,
-                      a: ({ node, href, children, ...props }) => {
+                    <ReactMarkdown
+                      components={{
+                      h2: ({...props}) => <h2 className="text-xl font-semibold text-gray-900 mt-6 mb-4" {...props} />,
+                      h3: ({...props}) => <h3 className="text-lg font-semibold text-gray-900 mt-4 mb-3" {...props} />,
+                      h4: ({...props}) => <h4 className="text-base font-semibold text-gray-900 mt-3 mb-2" {...props} />,
+                      p: ({...props}) => <p className="text-gray-700 leading-relaxed mb-3" {...props} />,
+                      strong: ({...props}) => <strong className="font-semibold text-gray-900" {...props} />,
+                      em: ({...props}) => <em className="italic text-gray-800" {...props} />,
+                      ul: ({...props}) => <ul className="list-disc ml-6 space-y-2 mb-4" {...props} />,
+                      ol: ({...props}) => <ol className="list-decimal ml-6 space-y-2 mb-4" {...props} />,
+                      li: ({...props}) => <li className="text-gray-700 leading-relaxed" {...props} />,
+                      a: ({ href, children, ...props }) => {
                         const safeHref = typeof href === 'string' ? href : ''
                         const cls = 'text-emerald-700 hover:text-emerald-800 underline decoration-emerald-300 underline-offset-2'
 
@@ -316,7 +316,7 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
                           </a>
                         )
                       },
-                      code: ({node, inline, ...props}) =>
+                      code: ({inline, ...props}) =>
                         inline ? (
                           <code className="bg-zinc-100 text-zinc-800 px-1.5 py-0.5 rounded text-sm font-mono" {...props} />
                         ) : (
@@ -339,10 +339,10 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
             <div className="text-sm text-gray-600 leading-relaxed prose prose-sm max-w-none">
               <ReactMarkdown
                 components={{
-                  p: ({node, ...props}) => <p className="text-sm text-gray-600 mb-2" {...props} />,
-                  strong: ({node, ...props}) => <strong className="font-semibold text-gray-700" {...props} />,
-                  em: ({node, ...props}) => <em className="italic" {...props} />,
-                  a: ({ node, href, children, ...props }) => {
+                  p: ({...props}) => <p className="text-sm text-gray-600 mb-2" {...props} />,
+                  strong: ({...props}) => <strong className="font-semibold text-gray-700" {...props} />,
+                  em: ({...props}) => <em className="italic" {...props} />,
+                  a: ({ href, children, ...props }) => {
                     const safeHref = typeof href === 'string' ? href : ''
                     const cls = 'text-emerald-700 hover:text-emerald-800 underline decoration-emerald-300 underline-offset-2'
                     if (safeHref.startsWith('#source-')) {
@@ -495,7 +495,7 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
     const takeaways = []
     
     // Extract first key point from each section
-    Object.entries(sections || {}).forEach(([key, content]) => {
+    Object.entries(sections || {}).forEach(([, content]) => {
       if (content && content !== 'Analysis not available for this section.') {
         const lines = content.split('\n').filter(line => line.trim())
         
@@ -621,7 +621,7 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
         )}
         
         <p className="text-sm text-gray-500">
-          Generated on {formatDate(created_at)} using {ai_provider === 'anthropic' ? 'Claude 3.5 Haiku' : 'GPT-4o Mini'}
+          Generated on {formatDate(created_at)} using {ai_provider === 'anthropic' ? 'Claude Sonnet 4' : 'GPT-4o'}
         </p>
 
         {analysis_data?.evidence?.overall && (
@@ -851,14 +851,14 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
             <div className="mt-4 text-sm text-gray-600 border-t pt-4 prose prose-sm max-w-none">
               <ReactMarkdown
                 components={{
-                  h2: ({node, ...props}) => <h2 className="text-lg font-semibold text-gray-900 mt-4 mb-3" {...props} />,
-                  h3: ({node, ...props}) => <h3 className="text-base font-semibold text-gray-900 mt-3 mb-2" {...props} />,
-                  p: ({node, ...props}) => <p className="text-gray-600 mb-2 leading-relaxed" {...props} />,
-                  strong: ({node, ...props}) => <strong className="font-semibold text-gray-700" {...props} />,
-                  em: ({node, ...props}) => <em className="italic" {...props} />,
-                  ul: ({node, ...props}) => <ul className="list-disc ml-4 space-y-1 mb-3" {...props} />,
-                  ol: ({node, ...props}) => <ol className="list-decimal ml-4 space-y-1 mb-3" {...props} />,
-                  li: ({node, ...props}) => <li className="text-gray-600" {...props} />,
+                  h2: ({...props}) => <h2 className="text-lg font-semibold text-gray-900 mt-4 mb-3" {...props} />,
+                  h3: ({...props}) => <h3 className="text-base font-semibold text-gray-900 mt-3 mb-2" {...props} />,
+                  p: ({...props}) => <p className="text-gray-600 mb-2 leading-relaxed" {...props} />,
+                  strong: ({...props}) => <strong className="font-semibold text-gray-700" {...props} />,
+                  em: ({...props}) => <em className="italic" {...props} />,
+                  ul: ({...props}) => <ul className="list-disc ml-4 space-y-1 mb-3" {...props} />,
+                  ol: ({...props}) => <ol className="list-decimal ml-4 space-y-1 mb-3" {...props} />,
+                  li: ({...props}) => <li className="text-gray-600" {...props} />,
                 }}
               >
                 {analysis_data.rawAnalysis}

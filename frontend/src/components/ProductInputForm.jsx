@@ -154,7 +154,6 @@ export default function ProductInputForm({ onSubmit, error }) {
     if (productUrl) {
       try {
         // Validate URL shape early to avoid backend schema errors
-        // eslint-disable-next-line no-new
         new URL(productUrl)
       } catch {
         setValidationError('Please enter a valid URL.')
@@ -536,7 +535,6 @@ export default function ProductInputForm({ onSubmit, error }) {
                                   const url = rawUrl ? normalizeUrl(rawUrl) : ''
                                   if (url) {
                                     try {
-                                      // eslint-disable-next-line no-new
                                       new URL(url)
                                     } catch {
                                       setValidationError('My product URL must be a valid URL.')
