@@ -3,7 +3,15 @@ import TurnstileWidget from './TurnstileWidget'
 
 const LAST_AI_PROVIDER_KEY = 'ptp_last_ai_provider_v1'
 const LAST_USER_GOALS_KEY = 'ptp_last_user_goals_v1'
+const LAST_FOCUS_PRESET_KEY = 'ptp_last_focus_preset_v1'
 const MY_PRODUCT_KEY = 'ptp_my_product_v1'
+const FOCUS_PRESETS = [
+  { value: 'general', label: 'General teardown' },
+  { value: 'onboarding', label: 'Onboarding & activation' },
+  { value: 'pricing', label: 'Pricing & packaging' },
+  { value: 'positioning', label: 'Positioning & differentiation' },
+  { value: 'growth', label: 'Growth opportunities' },
+]
 
 function normalizeUrl(raw) {
   const trimmed = String(raw || '').trim()
@@ -50,6 +58,7 @@ export default function ProductInputForm({ onSubmit, error }) {
   const [showOptions, setShowOptions] = useState(false)
   const [overrideName, setOverrideName] = useState('')
   const [overrideUrl, setOverrideUrl] = useState('')
+  const [focusPreset, setFocusPreset] = useState('general')
   const [userGoals, setUserGoals] = useState('')
   const [aiProvider, setAiProvider] = useState('openai')
   const [compareToMyProduct, setCompareToMyProduct] = useState(false)
@@ -66,6 +75,15 @@ export default function ProductInputForm({ onSubmit, error }) {
       const savedProvider = localStorage.getItem(LAST_AI_PROVIDER_KEY)
       if (savedProvider === 'openai' || savedProvider === 'anthropic') {
         setAiProvider(savedProvider)
+      }
+    } catch {
+      // ignore
+    }
+
+    try {
+      const savedPreset = localStorage.getItem(LAST_FOCUS_PRESET_KEY)
+      if (FOCUS_PRESETS.some((preset) => preset.value === savedPreset)) {
+        setFocusPreset(savedPreset)
       }
     } catch {
       // ignore
@@ -104,6 +122,14 @@ export default function ProductInputForm({ onSubmit, error }) {
       // ignore
     }
   }, [aiProvider])
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(LAST_FOCUS_PRESET_KEY, focusPreset)
+    } catch {
+      // ignore
+    }
+  }, [focusPreset])
 
   const parsed = useMemo(() => parseProductQuery(query), [query])
 
@@ -187,6 +213,7 @@ export default function ProductInputForm({ onSubmit, error }) {
       await onSubmit({
         productName,
         productUrl: productUrl || undefined,
+        focusPreset,
         userGoals: userGoals.trim() || undefined,
         aiProvider,
         turnstileToken: turnstileToken || undefined,
@@ -281,6 +308,28 @@ export default function ProductInputForm({ onSubmit, error }) {
             <div className="ptp-card p-5 bg-zinc-50 border border-zinc-200/70">
               <div className="grid grid-cols-1 gap-5">
                 <div>
+                  <label htmlFor="focusPreset" className="block text-sm font-medium text-zinc-800 mb-2">
+                    Teardown focus
+                  </label>
+                  <select
+                    id="focusPreset"
+                    value={focusPreset}
+                    onChange={(e) => setFocusPreset(e.target.value)}
+                    className="ptp-input"
+                    disabled={isSubmitting}
+                  >
+                    {FOCUS_PRESETS.map((preset) => (
+                      <option key={preset.value} value={preset.value}>
+                        {preset.label}
+                      </option>
+                    ))}
+                  </select>
+                  <p className="mt-2 text-xs text-zinc-500">
+                    Keeps the same teardown structure while changing the emphasis.
+                  </p>
+                </div>
+
+                <div>
                   <label htmlFor="userGoals" className="block text-sm font-medium text-zinc-800 mb-2">
                     Focus (optional)
                   </label>
@@ -319,7 +368,7 @@ export default function ProductInputForm({ onSubmit, error }) {
                         className="h-4 w-4 text-emerald-600 focus:ring-emerald-500 border-zinc-300"
                         disabled={isSubmitting}
                       />
-                      OpenAI (GPT-4o)
+                      OpenAI
                     </label>
 
                     <label className="flex items-center gap-2 rounded-lg border border-zinc-200/70 bg-white px-3 py-2 text-sm text-zinc-800">
@@ -332,7 +381,7 @@ export default function ProductInputForm({ onSubmit, error }) {
                         className="h-4 w-4 text-emerald-600 focus:ring-emerald-500 border-zinc-300"
                         disabled={isSubmitting}
                       />
-                      Anthropic (Claude Sonnet 4)
+                      Anthropic
                     </label>
                   </div>
                 </div>

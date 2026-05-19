@@ -122,19 +122,59 @@ function decodeHtmlEntities(input) {
     .replace(/&#x3D;/gi, '=');
 }
 
+function removeTaggedBlocks(html, tags) {
+  return tags.reduce((output, tag) => {
+    const pattern = new RegExp(`<${tag}\\b[\\s\\S]*?<\\/${tag}>`, 'gi');
+    return output.replace(pattern, ' ');
+  }, html);
+}
+
+function removeLikelyBoilerplateContainers(html) {
+  return html.replace(
+    /<(div|section|aside)[^>]*(?:id|class)\s*=\s*["'][^"']*(?:cookie|consent|gdpr|banner|modal|newsletter|site-header|site-footer|navbar|navigation|topbar)[^"']*["'][^>]*>[\s\S]*?<\/\1>/gi,
+    ' '
+  );
+}
+
+function isBoilerplateLine(line) {
+  const normalized = line.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!normalized) return true;
+
+  const exactMatches = new Set([
+    'accept',
+    'accept all',
+    'all rights reserved',
+    'cookie settings',
+    'privacy policy',
+    'terms of service',
+    'terms and conditions',
+    'skip to content',
+  ]);
+  if (exactMatches.has(normalized)) return true;
+
+  return [
+    /^copyright(?:\s|$)/,
+    /^©/,
+    /all rights reserved/,
+    /we use cookies/,
+    /cookie policy/,
+    /manage cookies/,
+    /your privacy choices/,
+  ].some((pattern) => pattern.test(normalized));
+}
+
 function htmlToText(html) {
   if (!html) return '';
 
   let cleaned = html;
 
   cleaned = cleaned.replace(/<!--[\s\S]*?-->/g, ' ');
-  cleaned = cleaned.replace(/<script[\s\S]*?<\/script>/gi, ' ');
-  cleaned = cleaned.replace(/<style[\s\S]*?<\/style>/gi, ' ');
-  cleaned = cleaned.replace(/<noscript[\s\S]*?<\/noscript>/gi, ' ');
+  cleaned = removeTaggedBlocks(cleaned, ['head', 'script', 'style', 'noscript', 'svg', 'header', 'footer', 'nav']);
+  cleaned = removeLikelyBoilerplateContainers(cleaned);
 
-  cleaned = cleaned.replace(/<\/?(header|footer|nav|svg)[\s\S]*?>/gi, ' ');
   cleaned = cleaned.replace(/<br\s*\/?>/gi, '\n');
-  cleaned = cleaned.replace(/<\/p>/gi, '\n');
+  cleaned = cleaned.replace(/<\/(p|div|section|article|main|h[1-6]|li)>/gi, '\n');
+  cleaned = cleaned.replace(/<li\b[^>]*>/gi, '\n- ');
 
   cleaned = cleaned.replace(/<\/?[^>]+>/g, ' ');
   cleaned = decodeHtmlEntities(cleaned);
@@ -142,18 +182,38 @@ function htmlToText(html) {
   cleaned = cleaned.replace(/\n{3,}/g, '\n\n');
   cleaned = cleaned.replace(/[ \t]{2,}/g, ' ');
 
-  return cleaned.trim();
+  const seenLines = new Set();
+  const filteredLines = cleaned
+    .split('\n')
+    .map((line) => line.replace(/\s+/g, ' ').trim())
+    .filter((line) => {
+      if (isBoilerplateLine(line)) return false;
+      const key = line.toLowerCase();
+      if (seenLines.has(key)) return false;
+      seenLines.add(key);
+      return true;
+    });
+
+  return filteredLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
 }
 
 function inferSourceType(url) {
   const lower = (url || '').toLowerCase();
   if (lower.includes('/pricing') || lower.includes('/plans')) return 'pricing';
-  if (lower.includes('/docs') || lower.includes('/help')) return 'docs';
+  if (lower.includes('/features') || lower.includes('/solutions') || lower.includes('/use-cases')) return 'features';
+  if (lower.includes('/docs') || lower.includes('/help') || lower.includes('/support')) return 'docs';
+  if (
+    lower.includes('/signup') ||
+    lower.includes('/register') ||
+    lower.includes('/trial') ||
+    lower.includes('/demo') ||
+    lower.includes('/contact-sales')
+  ) return 'signup';
   if (lower.endsWith('/')) return 'homepage';
   return 'other';
 }
 
-function buildCandidates(productUrl) {
+function validateProductUrl(productUrl) {
   const base = new URL(productUrl);
   if (!['http:', 'https:'].includes(base.protocol)) {
     throw new Error('Only http/https URLs are allowed');
@@ -162,22 +222,171 @@ function buildCandidates(productUrl) {
     throw new Error('URL hostname is not allowed');
   }
 
-  const origin = base.origin;
-  const candidates = [
-    productUrl,
-    new URL('/', origin).toString(),
-    new URL('/pricing', origin).toString(),
-    new URL('/plans', origin).toString(),
-    new URL('/features', origin).toString(),
-    new URL('/signup', origin).toString(),
-    new URL('/register', origin).toString(),
-    new URL('/docs', origin).toString(),
-    new URL('/help', origin).toString(),
+  return base;
+}
+
+function canonicalizeCandidateUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function isSameSiteCandidate(candidateUrl, allowedOrigins) {
+  try {
+    const candidate = new URL(candidateUrl);
+    if (!['http:', 'https:'].includes(candidate.protocol)) return false;
+    if (isLikelyPrivateHostname(candidate.hostname)) return false;
+
+    return allowedOrigins.some((origin) => {
+      const originUrl = new URL(origin);
+      if (candidate.origin === originUrl.origin) return true;
+
+      // Keep the existing www <-> apex tolerance without allowing protocol/port jumps.
+      return (
+        candidate.protocol === originUrl.protocol &&
+        candidate.port === originUrl.port &&
+        normalizeHostForWww(candidate.hostname) === normalizeHostForWww(originUrl.hostname)
+      );
+    });
+  } catch {
+    return false;
+  }
+}
+
+function buildPriorityUrls(origin) {
+  return [
+    '/pricing',
+    '/plans',
+    '/features',
+    '/solutions',
+    '/use-cases',
+    '/docs',
+    '/help',
+    '/support',
+    '/signup',
+    '/register',
+    '/trial',
+    '/demo',
+    '/contact-sales',
+    '/',
+  ].map((path) => new URL(path, origin).toString());
+}
+
+function extractAnchorCandidates(html, pageUrl, allowedOrigins) {
+  if (!html) return [];
+
+  const links = [];
+  const anchorPattern = /<a\b([^>]*)>([\s\S]*?)<\/a>/gi;
+  let match;
+
+  while ((match = anchorPattern.exec(html)) !== null) {
+    const attrs = match[1] || '';
+    const hrefMatch = attrs.match(/\bhref\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i);
+    if (!hrefMatch) continue;
+
+    const rawHref = decodeHtmlEntities(hrefMatch[1] || hrefMatch[2] || hrefMatch[3] || '').trim();
+    if (!rawHref || rawHref.startsWith('#')) continue;
+    if (/^(mailto|tel|javascript|data):/i.test(rawHref)) continue;
+
+    let resolved;
+    try {
+      resolved = canonicalizeCandidateUrl(new URL(rawHref, pageUrl).toString());
+    } catch {
+      continue;
+    }
+
+    if (!isSameSiteCandidate(resolved, allowedOrigins)) continue;
+
+    const linkText = htmlToText(match[2] || '').slice(0, 120);
+    links.push({ url: resolved, linkText });
+  }
+
+  return links;
+}
+
+function scoreCandidate(url, linkText = '') {
+  let parsed;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return 0;
+  }
+
+  const path = `${parsed.pathname}${parsed.search}`.toLowerCase();
+  const text = linkText.toLowerCase();
+  const haystack = `${path} ${text}`;
+
+  const scoredPatterns = [
+    { pattern: /\/(pricing|prices|plans|billing|compare)(\/|$|\?)/, score: 120 },
+    { pattern: /\/(features|product|solutions|use-cases|platform)(\/|$|\?)/, score: 105 },
+    { pattern: /\/(docs|documentation|help|support|knowledge-base|resources)(\/|$|\?)/, score: 95 },
+    { pattern: /\/(signup|sign-up|register|start|trial|demo|book-a-demo|contact-sales)(\/|$|\?)/, score: 90 },
+    { pattern: /\/(customers|case-studies|security|integrations|enterprise)(\/|$|\?)/, score: 70 },
+    { pattern: /\/(about|company)(\/|$|\?)/, score: 35 },
   ];
 
-  // De-dupe while preserving order
+  let score = path === '/' || path === '' ? 15 : 45;
+  for (const { pattern, score: patternScore } of scoredPatterns) {
+    if (pattern.test(haystack)) {
+      score = Math.max(score, patternScore);
+    }
+  }
+
+  if (/\/(blog|careers|jobs|press|privacy|terms|legal|login|signin|sign-in|status)(\/|$|\?)/.test(path)) {
+    score -= 45;
+  }
+
+  return score;
+}
+
+function addCandidate(candidateMap, url, metadata = {}) {
+  const canonical = canonicalizeCandidateUrl(url);
+  if (!canonical || candidateMap.has(canonical)) return;
+
+  candidateMap.set(canonical, {
+    url: canonical,
+    linkText: metadata.linkText || '',
+    order: candidateMap.size,
+    score: scoreCandidate(canonical, metadata.linkText || ''),
+  });
+}
+
+function buildSourceDraft(finalUrl, html, remaining, options) {
+  const title = extractTitleFromHtml(html);
+  const text = htmlToText(html);
+
+  if (!text || text.length < 200) {
+    return {
+      source: null,
+      limitation: `Low text content from ${finalUrl}`,
+    };
+  }
+
+  const clipped = text.slice(0, Math.min(text.length, options.perSourceMaxChars, remaining));
+
+  return {
+    source: {
+      url: finalUrl,
+      title: title || finalUrl,
+      type: inferSourceType(finalUrl),
+      _textForPrompt: clipped,
+    },
+    limitation: null,
+  };
+}
+
+function buildSeedUrls(base) {
+  const seeds = [
+    base.toString(),
+    new URL('/', base.origin).toString(),
+  ];
+
   const seen = new Set();
-  return candidates.filter((u) => {
+  return seeds.filter((u) => {
     if (seen.has(u)) return false;
     seen.add(u);
     return true;
@@ -205,8 +414,9 @@ async function ingestProductEvidence(productUrl, options = {}) {
   }
 
   let candidates;
+  let baseUrl;
   try {
-    candidates = buildCandidates(productUrl);
+    baseUrl = validateProductUrl(productUrl);
   } catch (err) {
     return {
       sources: [],
@@ -215,40 +425,91 @@ async function ingestProductEvidence(productUrl, options = {}) {
     };
   }
 
+  const allowedOrigins = new Set([baseUrl.origin]);
+  const candidateMap = new Map();
+  const fetchedDrafts = new Map();
   const sources = [];
   const limitations = [];
   let remaining = merged.totalContextMaxChars;
 
-  for (const candidate of candidates) {
+  for (const priorityUrl of buildPriorityUrls(baseUrl.origin)) {
+    addCandidate(candidateMap, priorityUrl);
+  }
+
+  candidates = buildSeedUrls(baseUrl);
+  for (const seedUrl of candidates) {
+    addCandidate(candidateMap, seedUrl);
+
+    try {
+      const { finalUrl, html } = await fetchHtmlWithLimitedRedirects(seedUrl, merged);
+      const final = new URL(finalUrl);
+      allowedOrigins.add(final.origin);
+
+      for (const priorityUrl of buildPriorityUrls(final.origin)) {
+        if (isSameSiteCandidate(priorityUrl, Array.from(allowedOrigins))) {
+          addCandidate(candidateMap, priorityUrl);
+        }
+      }
+
+      const canonicalFinal = canonicalizeCandidateUrl(finalUrl);
+      const canonicalSeed = canonicalizeCandidateUrl(seedUrl);
+      const draft = buildSourceDraft(finalUrl, html, remaining, merged);
+      if (draft.limitation) limitations.push(draft.limitation);
+      fetchedDrafts.set(canonicalFinal, draft.source);
+      fetchedDrafts.set(canonicalSeed, draft.source);
+
+      for (const link of extractAnchorCandidates(html, finalUrl, Array.from(allowedOrigins))) {
+        addCandidate(candidateMap, link.url, { linkText: link.linkText });
+      }
+    } catch (err) {
+      limitations.push(`Failed to fetch ${seedUrl}: ${err.message || 'unknown error'}`);
+    }
+  }
+
+  const rankedCandidates = Array.from(candidateMap.values())
+    .filter((candidate) => isSameSiteCandidate(candidate.url, Array.from(allowedOrigins)))
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.order - b.order;
+    });
+
+  for (const candidate of rankedCandidates) {
     if (sources.length >= merged.maxSources) break;
     if (remaining <= 500) break;
 
     try {
-      const { finalUrl, html } = await fetchHtmlWithLimitedRedirects(candidate, merged);
-      const title = extractTitleFromHtml(html);
-      const text = htmlToText(html);
+      const canonical = canonicalizeCandidateUrl(candidate.url);
+      let sourceDraft = fetchedDrafts.get(canonical);
 
-      if (!text || text.length < 200) {
-        limitations.push(`Low text content from ${finalUrl}`);
-        continue;
+      if (sourceDraft === undefined) {
+        const { finalUrl, html } = await fetchHtmlWithLimitedRedirects(candidate.url, merged);
+        const draft = buildSourceDraft(finalUrl, html, remaining, merged);
+        if (draft.limitation) {
+          limitations.push(draft.limitation);
+          fetchedDrafts.set(canonical, null);
+          continue;
+        }
+        sourceDraft = draft.source;
+        fetchedDrafts.set(canonical, sourceDraft);
+        fetchedDrafts.set(canonicalizeCandidateUrl(sourceDraft.url), sourceDraft);
       }
 
+      if (!sourceDraft) continue;
+
       const id = `src_${sources.length + 1}`;
-      const type = inferSourceType(finalUrl);
-      const clipped = text.slice(0, Math.min(text.length, merged.perSourceMaxChars, remaining));
-      remaining -= clipped.length;
+      remaining -= sourceDraft._textForPrompt.length;
 
       sources.push({
         id,
-        url: finalUrl,
-        title: title || finalUrl,
-        type,
+        url: sourceDraft.url,
+        title: sourceDraft.title,
+        type: sourceDraft.type,
         fetchedAt: new Date().toISOString(),
-        snippet: clipped.slice(0, 320).replace(/\s+/g, ' ').trim(),
-        _textForPrompt: clipped,
+        snippet: sourceDraft._textForPrompt.slice(0, 320).replace(/\s+/g, ' ').trim(),
+        _textForPrompt: sourceDraft._textForPrompt,
       });
     } catch (err) {
-      limitations.push(`Failed to fetch ${candidate}: ${err.message || 'unknown error'}`);
+      limitations.push(`Failed to fetch ${candidate.url}: ${err.message || 'unknown error'}`);
     }
   }
 
@@ -285,5 +546,3 @@ async function ingestProductEvidence(productUrl, options = {}) {
 module.exports = {
   ingestProductEvidence,
 };
-
-

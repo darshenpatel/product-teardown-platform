@@ -44,6 +44,7 @@ describe('ProductInputForm', () => {
       expect(mockOnSubmit).toHaveBeenCalledWith({
         productName: 'Example',
         productUrl: 'https://example.com',
+        focusPreset: 'general',
         userGoals: undefined,
         aiProvider: 'openai'
       })
@@ -61,7 +62,9 @@ describe('ProductInputForm', () => {
     await user.type(queryInput, 'Test Product')
     await user.click(optionsButton)
 
-    const goalsInput = screen.getByLabelText(/focus/i)
+    const goalsInput = screen.getByLabelText(/^focus \(optional\)$/i)
+    const presetSelect = screen.getByLabelText(/teardown focus/i)
+    await user.selectOptions(presetSelect, 'pricing')
     await user.type(goalsInput, 'Test goals')
     await user.click(submitButton)
     
@@ -69,6 +72,7 @@ describe('ProductInputForm', () => {
       expect(mockOnSubmit).toHaveBeenCalledWith({
         productName: 'Test Product',
         productUrl: undefined,
+        focusPreset: 'pricing',
         userGoals: 'Test goals',
         aiProvider: 'openai' // default selection
       })

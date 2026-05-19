@@ -118,7 +118,33 @@ describe('Analysis Route', () => {
       expect(parsed.sections.pricing).toContain('Freemium');
       expect(parsed.sections.deltaVsMyProduct).toContain('Stronger templates');
       expect(parsed.evidence.onboarding.sourceIds).toEqual(['src_1']);
+      expect(parsed.evidence.onboarding.claims[0]).toEqual(expect.objectContaining({
+        basis: 'sourced',
+        sourceIds: ['src_1'],
+      }));
       expect(parsed.rawAnalysis).toContain('## 1. User Onboarding');
+    });
+
+    it('should ignore invented citations in claim metadata', () => {
+      const parsed = __test__.parseAnalysisResponse(JSON.stringify({
+        sections: {
+          onboarding: '**Onboarding Flow**\n- Guided workspace setup [src_99] with clear next action for new teams.',
+          pricing: '**Pricing Model**\n- Pricing section with enough useful content for metadata extraction.',
+          valueProps: '**Primary Value**\n- Value proposition content with enough useful content for metadata extraction.',
+          competitive: '**Strengths**\n- Competitive content with enough useful content for metadata extraction.',
+          actionPlan: '**What to copy**\n- Action content with enough useful content for metadata extraction.',
+          deltaVsMyProduct: '',
+        },
+      }), {
+        sources: [{ id: 'src_1' }],
+        expectsDeltaSection: false,
+      });
+
+      expect(parsed.evidence.onboarding.sourceIds).toEqual([]);
+      expect(parsed.evidence.onboarding.claims[0]).toEqual(expect.objectContaining({
+        basis: 'inferred',
+        sourceIds: [],
+      }));
     });
 
     it('should parse fenced JSON output', () => {
@@ -147,6 +173,44 @@ describe('Analysis Route', () => {
       expect(parsed.sections.deltaVsMyProduct).toBe('Analysis not available for this section.');
     });
 
+    it('should preserve optional summary and quality fields from structured JSON', () => {
+      const analysisText = JSON.stringify({
+        summary: {
+          headline: 'Linear wins by making planning feel fast and opinionated.',
+          topTakeaways: [
+            'Use opinionated defaults to shorten setup.',
+            'Make pricing expansion map to team maturity.',
+            'Turn workflow speed into the central product promise.',
+          ],
+          keyRisks: ['Pricing details may shift over time.'],
+          openQuestions: ['Which activation step creates the first retained project?'],
+          recommendedNextMove: 'Prototype a template-led activation path.',
+        },
+        sections: {
+          onboarding: '**Onboarding Flow**\n- Guided workspace setup [src_1]',
+          pricing: '**Pricing Model**\n- Freemium with paid team tiers [src_1]',
+          valueProps: '**Primary Value**\n- Faster planning cycles',
+          competitive: '**Strengths**\n- Tight execution loops',
+          actionPlan: '**What to copy**\n- Shorten activation path',
+          deltaVsMyProduct: '',
+        },
+        quality: {
+          confidenceNotes: ['Homepage and pricing evidence were available.'],
+          evidenceGaps: ['No authenticated onboarding screens were fetched.'],
+        },
+      });
+
+      const parsed = __test__.parseAnalysisResponse(analysisText, {
+        sources: [{ id: 'src_1' }],
+        expectsDeltaSection: false,
+      });
+
+      expect(parsed.summary.topTakeaways).toHaveLength(3);
+      expect(parsed.summary.recommendedNextMove).toContain('activation');
+      expect(parsed.quality.confidenceNotes).toEqual(['Homepage and pricing evidence were available.']);
+      expect(parsed.quality.evidenceGaps).toEqual(['No authenticated onboarding screens were fetched.']);
+    });
+
     it('should fall back to markdown extraction when structured output is malformed', () => {
       const analysisText = [
         '## 1. User Onboarding',
@@ -172,6 +236,36 @@ describe('Analysis Route', () => {
       expect(parsed.sections.onboarding).toContain('Strong activation');
       expect(parsed.sections.pricing).toContain('Tiered pricing');
       expect(parsed.rawAnalysis).toContain('## 1. User Onboarding');
+    });
+
+    it('should flag weak, generic, uncited output when quality guard fails', () => {
+      const parsed = __test__.parseAnalysisResponse(JSON.stringify({
+        sections: {
+          onboarding: '**Onboarding Flow**\n- To analyze onboarding, review the signup flow.',
+          pricing: '**Pricing Model**\n- Analysis content available.',
+          valueProps: '**Primary Value**\n- A specific strength of the product.',
+          competitive: '**Strengths**\n- Another specific strength.',
+          actionPlan: '**Experiments to run**\n- Test something.',
+          deltaVsMyProduct: '',
+        },
+      }), {
+        sources: [{ id: 'src_1' }],
+        expectsDeltaSection: false,
+      });
+
+      const result = __test__.assessAnalysisQuality(parsed, {
+        sources: [{ id: 'src_1' }],
+        expectsDeltaSection: false,
+      });
+
+      expect(result.passed).toBe(false);
+      expect(result.warnings).toEqual(expect.arrayContaining([
+        expect.stringContaining('too short'),
+        expect.stringContaining('generic filler phrase'),
+        expect.stringContaining('did not cite any source IDs'),
+        expect.stringContaining('Summary headline is missing'),
+      ]));
+      expect(result.evidenceGaps).toEqual(['No inline citations were used despite fetched evidence sources.']);
     });
   });
 });

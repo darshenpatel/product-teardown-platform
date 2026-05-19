@@ -9,6 +9,37 @@ const fileStore = require('../utils/fileStore');
 
 const router = express.Router();
 const MISSING_SECTION_TEXT = 'Analysis not available for this section.';
+const SYSTEM_PROMPT = [
+  'You are a product analysis expert with deep knowledge of software products and business models.',
+  'You MUST provide specific, detailed analysis about the exact product requested - never generic frameworks or instructional content.',
+  'Base your analysis on actual product knowledge and provided evidence, and make reasonable labeled inferences when needed.',
+  'If evidence sources are provided, use them as grounding context and add citations like [src_1] when referencing them.',
+  'Return ONLY valid JSON that matches the requested schema.'
+].join(' ');
+const DEFAULT_OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.2';
+const DEFAULT_ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || 'claude-opus-4-1-20250805';
+const FOCUS_PRESETS = {
+  general: {
+    label: 'General teardown',
+    guidance: 'Balance onboarding, pricing, value proposition, differentiation, and action plan equally.',
+  },
+  onboarding: {
+    label: 'Onboarding & activation',
+    guidance: 'Emphasize first-run experience, activation moments, time to value, setup friction, invitation loops, and activation metrics.',
+  },
+  pricing: {
+    label: 'Pricing & packaging',
+    guidance: 'Emphasize packaging, tiers, monetization levers, buyer objections, expansion paths, and pricing experiments.',
+  },
+  positioning: {
+    label: 'Positioning & differentiation',
+    guidance: 'Emphasize ICP, messaging, competitive alternatives, category framing, proof points, and defensible differentiation.',
+  },
+  growth: {
+    label: 'Growth opportunities',
+    guidance: 'Emphasize acquisition loops, retention drivers, expansion opportunities, product-led growth signals, and concrete experiments.',
+  },
+};
 const SECTION_ORDER = [
   ['onboarding', 'User Onboarding'],
   ['pricing', 'Pricing Strategy'],
@@ -43,6 +74,7 @@ const analysisSchema = Joi.object({
   productName: Joi.string().min(1).max(200).required(),
   productUrl: Joi.string().uri().optional(),
   userGoals: Joi.string().max(1000).optional(),
+  focusPreset: Joi.string().valid(...Object.keys(FOCUS_PRESETS)).default('general'),
   aiProvider: Joi.string().valid('openai', 'anthropic').default('openai'),
   turnstileToken: Joi.string().max(5000).optional(),
   myProduct: Joi.object({
@@ -62,6 +94,7 @@ const persistedAnalysisSchema = Joi.object({
     notes: Joi.string().max(2000).allow('', null).optional(),
   }).allow(null).optional(),
   user_goals: Joi.string().max(1000).allow('', null).optional(),
+  focus_preset: Joi.string().valid(...Object.keys(FOCUS_PRESETS)).allow('', null).optional(),
   ai_provider: Joi.string().valid('openai', 'anthropic').required(),
   analysis_data: Joi.object({
     sections: Joi.object().required(),
@@ -69,6 +102,10 @@ const persistedAnalysisSchema = Joi.object({
     sources: Joi.array().required(),
     rawAnalysis: Joi.string().required(),
     generatedAt: Joi.string().required(),
+    model: Joi.string().max(200).optional(),
+    summary: Joi.object().unknown(true).optional(),
+    quality: Joi.object().unknown(true).optional(),
+    diagnostics: Joi.object().unknown(true).optional(),
     originalSections: Joi.object().optional(),
     edits: Joi.object().optional(),
   }).required(),
@@ -116,7 +153,7 @@ router.post('/', analysisLimit, async (req, res) => {
       });
     }
 
-    const { productName, productUrl, userGoals, aiProvider, myProduct, turnstileToken } = value;
+    const { productName, productUrl, userGoals, focusPreset, aiProvider, myProduct, turnstileToken } = value;
     aiProviderForError = aiProvider;
 
     // Anti-abuse: require Turnstile token only when configured.
@@ -157,51 +194,16 @@ router.post('/', analysisLimit, async (req, res) => {
       ? { sources: [], contextForPrompt: '', limitations: ['Evidence ingestion disabled in test environment.'] }
       : await ingestProductEvidence(productUrl);
 
-    // Build prompt
-    const prompt = buildAnalysisPrompt(productName, productUrl, userGoals, evidence.contextForPrompt, myProduct);
-
-    // Call AI provider
-    let analysisText;
     const expectsDeltaSection = Boolean(myProduct && myProduct.name);
-    
-    if (aiProvider === 'anthropic') {
-      const response = await anthropic.messages.create({
-        model: "claude-sonnet-4-20250514",
-        max_tokens: 2000,
-        temperature: 0.3,
-        system: "You are a product analysis expert with deep knowledge of software products and business models. You MUST provide specific, detailed analysis about the exact product requested - never generic frameworks or instructional content. Base your analysis on actual product knowledge and make reasonable inferences when needed. If evidence sources are provided, use them as grounding context and add citations like [src_1] when referencing them. Return ONLY valid JSON that matches the requested schema.",
-        messages: [
-          {
-            role: "user",
-            content: prompt
-          }
-        ]
-      });
-      analysisText = response.content[0].text;
-    } else {
-      // Default to OpenAI
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          {
-            role: "system",
-            content: "You are a product analysis expert with deep knowledge of software products and business models. You MUST provide specific, detailed analysis about the exact product requested - never generic frameworks or instructional content. Base your analysis on actual product knowledge and make reasonable inferences when needed. If evidence sources are provided, use them as grounding context and add citations like [src_1] when referencing them. Return ONLY valid JSON that matches the requested schema."
-          },
-          {
-            role: "user",
-            content: prompt
-          }
-        ],
-        temperature: 0.3,
-        max_tokens: 2000
-      });
-      analysisText = completion.choices[0].message.content;
-    }
-    
-    // Parse response into structured sections
-    const structuredAnalysis = parseAnalysisResponse(analysisText, {
-      sources: evidence.sources,
-      evidenceLimitations: evidence.limitations,
+
+    const structuredAnalysis = await generateQualityCheckedAnalysis({
+      aiProvider,
+      productName,
+      productUrl,
+      userGoals,
+      focusPreset,
+      evidence,
+      myProduct,
       expectsDeltaSection,
     });
 
@@ -211,6 +213,7 @@ router.post('/', analysisLimit, async (req, res) => {
       product_url: productUrl,
       my_product: myProduct,
       user_goals: userGoals,
+      focus_preset: focusPreset,
       ai_provider: aiProvider,
       analysis_data: structuredAnalysis,
       created_at: new Date().toISOString()
@@ -341,7 +344,119 @@ router.delete('/', async (req, res) => {
 });
 
 // Helper functions
-function buildAnalysisPrompt(productName, productUrl, userGoals, evidenceContextForPrompt, myProduct) {
+async function generateQualityCheckedAnalysis({
+  aiProvider,
+  productName,
+  productUrl,
+  userGoals,
+  focusPreset,
+  evidence,
+  myProduct,
+  expectsDeltaSection,
+}) {
+  const startedAt = Date.now();
+  let retryCount = 0;
+  const model = getAnalysisModel(aiProvider);
+  const prompt = buildAnalysisPrompt(productName, productUrl, userGoals, evidence.contextForPrompt, myProduct, focusPreset);
+  const parseOptions = {
+    sources: evidence.sources,
+    evidenceLimitations: evidence.limitations,
+    expectsDeltaSection,
+    model,
+  };
+
+  const initialText = await callAnalysisProvider(aiProvider, prompt);
+  let analysis = parseAnalysisResponse(initialText, parseOptions);
+  let assessment = assessAnalysisQuality(analysis, {
+    sources: evidence.sources,
+    expectsDeltaSection,
+  });
+  let retried = false;
+
+  if (!assessment.passed) {
+    retryCount = 1;
+    retried = true;
+    const retryText = await callAnalysisProvider(
+      aiProvider,
+      buildQualityRetryPrompt(prompt, assessment.warnings)
+    );
+    const retryAnalysis = parseAnalysisResponse(retryText, parseOptions);
+    const retryAssessment = assessAnalysisQuality(retryAnalysis, {
+      sources: evidence.sources,
+      expectsDeltaSection,
+    });
+
+    analysis = retryAnalysis;
+    assessment = retryAssessment;
+  }
+
+  return attachQualityAssessment(analysis, assessment, {
+    aiProvider,
+    model,
+    retryCount,
+    retried,
+    sourceCount: Array.isArray(evidence.sources) ? evidence.sources.length : 0,
+    generationTimeMs: Date.now() - startedAt,
+  });
+}
+
+async function callAnalysisProvider(aiProvider, prompt) {
+  const model = getAnalysisModel(aiProvider);
+
+  if (aiProvider === 'anthropic') {
+    const response = await anthropic.messages.create({
+      model,
+      max_tokens: 3500,
+      temperature: 0.3,
+      system: SYSTEM_PROMPT,
+      messages: [
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+    });
+
+    return response.content[0].text;
+  }
+
+  const completion = await openai.chat.completions.create({
+    model,
+    messages: [
+      {
+        role: 'system',
+        content: SYSTEM_PROMPT,
+      },
+      {
+        role: 'user',
+        content: prompt,
+      },
+    ],
+    temperature: 0.3,
+    max_tokens: 3500,
+  });
+
+  return completion.choices[0].message.content;
+}
+
+function getAnalysisModel(aiProvider) {
+  return aiProvider === 'anthropic'
+    ? DEFAULT_ANTHROPIC_MODEL
+    : DEFAULT_OPENAI_MODEL;
+}
+
+function buildQualityRetryPrompt(originalPrompt, warnings) {
+  return `${originalPrompt}
+
+QUALITY FIX REQUIRED:
+Your previous response did not meet the teardown quality bar.
+Fix these issues before returning the same JSON shape:
+${(warnings || []).map((warning) => `- ${warning}`).join('\n')}
+
+Return ONLY the corrected JSON. Keep the same keys. Make every section specific, evidence-aware, and PM-actionable.`;
+}
+
+function buildAnalysisPrompt(productName, productUrl, userGoals, evidenceContextForPrompt, myProduct, focusPreset = 'general') {
   let prompt = `You are analyzing the specific product "${productName}"`;
   
   if (productUrl) {
@@ -356,11 +471,14 @@ function buildAnalysisPrompt(productName, productUrl, userGoals, evidenceContext
 - DO NOT provide generic frameworks, templates, or instructional content
 - DO NOT say things like "To analyze..." or "Framework to apply..." or "I'd recommend visiting..."
 - You MUST base your analysis on actual knowledge of ${productName}
-- If you don't have specific information, make reasonable inferences based on typical patterns for similar products
+- If you don't have specific information, make reasonable inferences based on typical patterns for similar products and label them as inferred
 - Return ONLY valid JSON
 - Do NOT wrap the JSON in markdown fences
 - Each section value must be a markdown string with scannable bullets/subheadings
 - Keep inline citations like [src_1] inside the markdown strings when evidence supports a claim
+- Every section must connect: observation -> implication -> action
+- Avoid generic strategy language unless it is tied directly to ${productName}
+- The action plan experiments must include a hypothesis, success metric, and expected decision
 
 Provide detailed analysis in exactly these ${totalSections} sections:
 
@@ -408,7 +526,7 @@ Provide detailed analysis in exactly these ${totalSections} sections:
     `Use these sub-sections and keep bullets scannable:\n` +
     `**What to copy**: 3–5 concrete elements to emulate\n` +
     `**What to avoid**: 3–5 pitfalls/tradeoffs\n` +
-    `**Experiments to run**: 3–5 experiments (include a hypothesis + success metric)\n` +
+    `**Experiments to run**: 3–5 experiments (include a hypothesis, success metric, and expected decision)\n` +
     `**Metrics to watch**: 3–5 metrics that would validate the strategy\n` +
     `**Open questions**: 3–5 questions to resolve with further evidence\n` +
     `If you reference evidence sources, cite them inline like [src_1].`;
@@ -438,6 +556,9 @@ Provide detailed analysis in exactly these ${totalSections} sections:
     prompt += `\n\nUser's specific goals: ${userGoals}`;
   }
 
+  const preset = FOCUS_PRESETS[focusPreset] || FOCUS_PRESETS.general;
+  prompt += `\n\nTEARDOWN FOCUS PRESET: ${preset.label}\n${preset.guidance}\nUse this as emphasis only; still return the same complete section schema.`;
+
   if (evidenceContextForPrompt) {
     prompt += `\n\n${evidenceContextForPrompt}`;
   } else {
@@ -446,19 +567,30 @@ Provide detailed analysis in exactly these ${totalSections} sections:
 
   prompt += `\n\nReturn JSON in exactly this shape:
 {
+  "summary": {
+    "headline": "one sentence specific verdict",
+    "topTakeaways": ["3 specific PM takeaways"],
+    "keyRisks": ["2-4 risks or caveats"],
+    "openQuestions": ["2-4 questions to resolve with more evidence"],
+    "recommendedNextMove": "one concrete next step"
+  },
   "sections": {
     "onboarding": "markdown string",
     "pricing": "markdown string",
     "valueProps": "markdown string",
     "competitive": "markdown string",
     "actionPlan": "markdown string",${hasMyProduct ? '\n    "deltaVsMyProduct": "markdown string"' : '\n    "deltaVsMyProduct": ""'}
+  },
+  "quality": {
+    "confidenceNotes": ["short notes on what is sourced vs inferred"],
+    "evidenceGaps": ["important missing evidence or uncertainty"]
   }
 }
 
 Rules for the JSON:
 - Include all keys exactly as shown above
 - Use an empty string for deltaVsMyProduct only when no comparison baseline exists
-- Do not include extra top-level keys
+- Do not include extra top-level keys beyond summary, sections, and quality
 - Do not include explanatory text before or after the JSON
 
 Remember: Provide SPECIFIC analysis about ${productName}, not generic business frameworks or instructions.\nIf you reference evidence sources, add citations like [src_1].`;
@@ -471,24 +603,40 @@ function parseAnalysisResponse(analysisText, options = {}) {
     sources = [],
     evidenceLimitations = [],
     expectsDeltaSection = false,
+    model,
   } = options;
 
-  const structuredSections = parseStructuredSections(analysisText, expectsDeltaSection);
-  const usedStructuredSections = Boolean(structuredSections);
-  const sections = structuredSections || extractSectionsFromMarkdown(analysisText, expectsDeltaSection);
+  const structuredPayload = parseStructuredPayload(analysisText, expectsDeltaSection);
+  const usedStructuredPayload = Boolean(structuredPayload?.sections);
+  const sections = structuredPayload?.sections || extractSectionsFromMarkdown(analysisText, expectsDeltaSection);
 
-  return {
+  const parsed = {
     sections,
     evidence: buildEvidenceMeta(sections, sources, evidenceLimitations),
     sources,
-    rawAnalysis: usedStructuredSections
+    rawAnalysis: usedStructuredPayload
       ? buildRawAnalysisFromSections(sections, expectsDeltaSection)
       : analysisText,
-    generatedAt: new Date().toISOString()
+    generatedAt: new Date().toISOString(),
+    model,
   };
+
+  if (structuredPayload?.summary) {
+    parsed.summary = structuredPayload.summary;
+  }
+
+  if (structuredPayload?.quality) {
+    parsed.quality = structuredPayload.quality;
+  }
+
+  return parsed;
 }
 
 function parseStructuredSections(text, expectsDeltaSection) {
+  return parseStructuredPayload(text, expectsDeltaSection)?.sections || null;
+}
+
+function parseStructuredPayload(text, expectsDeltaSection) {
   const jsonCandidate = extractJsonCandidate(text);
   if (!jsonCandidate) return null;
 
@@ -506,10 +654,67 @@ function parseStructuredSections(text, expectsDeltaSection) {
     const requiredKeys = ['onboarding', 'pricing', 'valueProps', 'competitive', 'actionPlan'];
     const hasAllRequiredSections = requiredKeys.every((key) => normalized[key] !== MISSING_SECTION_TEXT);
 
-    return hasAllRequiredSections ? normalized : null;
+    if (!hasAllRequiredSections) {
+      return null;
+    }
+
+    return {
+      sections: normalized,
+      summary: normalizeSummary(parsed?.summary),
+      quality: normalizeQuality(parsed?.quality),
+    };
   } catch {
     return null;
   }
+}
+
+function normalizeSummary(summary) {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) {
+    return null;
+  }
+
+  const normalized = {
+    headline: normalizeSingleLine(summary.headline),
+    topTakeaways: normalizeStringArray(summary.topTakeaways).slice(0, 3),
+    keyRisks: normalizeStringArray(summary.keyRisks).slice(0, 4),
+    openQuestions: normalizeStringArray(summary.openQuestions).slice(0, 4),
+    recommendedNextMove: normalizeSingleLine(summary.recommendedNextMove),
+  };
+
+  const hasContent = Object.values(normalized).some((value) => (
+    Array.isArray(value) ? value.length > 0 : Boolean(value)
+  ));
+
+  return hasContent ? normalized : null;
+}
+
+function normalizeQuality(quality) {
+  if (!quality || typeof quality !== 'object' || Array.isArray(quality)) {
+    return null;
+  }
+
+  const normalized = {
+    confidenceNotes: normalizeStringArray(quality.confidenceNotes),
+    evidenceGaps: normalizeStringArray(quality.evidenceGaps),
+    warnings: normalizeStringArray(quality.warnings),
+  };
+
+  const hasContent = Object.values(normalized).some((value) => value.length > 0);
+  return hasContent ? normalized : null;
+}
+
+function normalizeSingleLine(value) {
+  if (typeof value !== 'string') return '';
+  return value.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeStringArray(value) {
+  if (!value) return [];
+  const items = Array.isArray(value) ? value : [value];
+
+  return items
+    .map((item) => normalizeSingleLine(item))
+    .filter(Boolean);
 }
 
 function extractJsonCandidate(text) {
@@ -680,6 +885,7 @@ function buildEvidenceMeta(sections, sources = [], evidenceLimitations = []) {
       basis,
       confidence,
       sourceIds,
+      claims: extractEvidenceClaims(content, allowedSourceIds),
       limitations: evidenceLimitations || [],
     };
   }
@@ -706,11 +912,165 @@ function buildEvidenceMeta(sections, sources = [], evidenceLimitations = []) {
   };
 }
 
+function assessAnalysisQuality(analysis, options = {}) {
+  const {
+    sources = [],
+    expectsDeltaSection = false,
+  } = options;
+
+  const warnings = [];
+  const evidenceGaps = [];
+  const sections = analysis?.sections || {};
+  const requiredSectionKeys = expectsDeltaSection
+    ? ['onboarding', 'pricing', 'valueProps', 'competitive', 'actionPlan', 'deltaVsMyProduct']
+    : ['onboarding', 'pricing', 'valueProps', 'competitive', 'actionPlan'];
+
+  for (const key of requiredSectionKeys) {
+    const content = sections[key] || '';
+    const label = humanizeKey(key);
+
+    if (!content || content === MISSING_SECTION_TEXT) {
+      warnings.push(`${label} is missing.`);
+      continue;
+    }
+
+    if (content.replace(/\s+/g, ' ').trim().length < 180) {
+      warnings.push(`${label} is too short to be a useful teardown section.`);
+    }
+
+    const missingSubsections = findMissingSubsections(key, content);
+    if (missingSubsections.length > 0) {
+      warnings.push(`${label} is missing expected subsections: ${missingSubsections.join(', ')}.`);
+    }
+  }
+
+  const allSectionText = requiredSectionKeys
+    .map((key) => sections[key] || '')
+    .join('\n\n');
+
+  const genericPhrases = [
+    'to analyze',
+    'framework to apply',
+    "i'd recommend visiting",
+    'specific strength of',
+    'another specific',
+    'third specific',
+    'analysis available - check full details',
+    'analysis content available',
+  ];
+
+  const lowerText = allSectionText.toLowerCase();
+  for (const phrase of genericPhrases) {
+    if (lowerText.includes(phrase)) {
+      warnings.push(`Output contains generic filler phrase: "${phrase}".`);
+    }
+  }
+
+  if ((sources || []).length > 0 && extractCitedSourceIds(allSectionText).length === 0) {
+    warnings.push('Evidence sources were available, but the analysis did not cite any source IDs.');
+    evidenceGaps.push('No inline citations were used despite fetched evidence sources.');
+  }
+
+  const summary = analysis?.summary;
+  if (!summary?.headline) {
+    warnings.push('Summary headline is missing.');
+  }
+  if (!Array.isArray(summary?.topTakeaways) || summary.topTakeaways.length < 3) {
+    warnings.push('Summary needs exactly 3 useful top takeaways.');
+  }
+  if (!summary?.recommendedNextMove) {
+    warnings.push('Summary recommended next move is missing.');
+  }
+
+  return {
+    passed: warnings.length === 0,
+    warnings: Array.from(new Set(warnings)),
+    evidenceGaps,
+  };
+}
+
+function findMissingSubsections(sectionKey, content) {
+  const lower = String(content || '').toLowerCase();
+  const expectedBySection = {
+    onboarding: ['onboarding flow', 'time to value', 'highlights'],
+    pricing: ['pricing model', 'tiers', 'strategy', 'competitive position'],
+    valueProps: ['primary value', 'secondary benefits', 'target audience', 'differentiators'],
+    competitive: ['strengths', 'weaknesses', 'opportunities', 'threats'],
+    actionPlan: ['what to copy', 'what to avoid', 'experiments to run', 'hypothesis', 'metric', 'expected decision', 'metrics to watch', 'open questions'],
+    deltaVsMyProduct: ['biggest deltas', 'what to change', 'risks', 'quick wins', 'bigger bets'],
+  };
+
+  return (expectedBySection[sectionKey] || [])
+    .filter((needle) => !lower.includes(needle));
+}
+
+function attachQualityAssessment(analysis, assessment, diagnostics = {}) {
+  const existingQuality = normalizeQuality(analysis?.quality) || {
+    confidenceNotes: [],
+    evidenceGaps: [],
+    warnings: [],
+  };
+
+  return {
+    ...analysis,
+    quality: {
+      ...existingQuality,
+      confidenceNotes: existingQuality.confidenceNotes,
+      evidenceGaps: Array.from(new Set([
+        ...(existingQuality.evidenceGaps || []),
+        ...(assessment.evidenceGaps || []),
+      ])),
+      warnings: Array.from(new Set([
+        ...(existingQuality.warnings || []),
+        ...(assessment.warnings || []),
+      ])),
+      passed: Boolean(assessment.passed),
+      retried: Boolean(diagnostics.retried),
+    },
+    diagnostics: {
+      provider: diagnostics.aiProvider,
+      model: diagnostics.model || analysis?.model,
+      retried: Boolean(diagnostics.retried),
+      retryCount: Number.isInteger(diagnostics.retryCount) ? diagnostics.retryCount : 0,
+      sourceCount: Number.isInteger(diagnostics.sourceCount) ? diagnostics.sourceCount : 0,
+      qualityPassed: Boolean(assessment.passed),
+      qualityWarningCount: Array.isArray(assessment.warnings) ? assessment.warnings.length : 0,
+      generationTimeMs: Number.isFinite(diagnostics.generationTimeMs) ? diagnostics.generationTimeMs : 0,
+    },
+  };
+}
+
 function extractCitedSourceIds(text) {
   if (!text) return [];
   const matches = text.match(/\[src_\d+\]/g) || [];
   const ids = matches.map(m => m.slice(1, -1));
   return Array.from(new Set(ids));
+}
+
+function extractEvidenceClaims(text, allowedSourceIds = new Set()) {
+  if (!text) return [];
+
+  return String(text)
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => !line.match(/^#{1,6}\s+/))
+    .map((line) => line.replace(/^[-*•]\s+/, '').replace(/^\d+\.\s+/, '').trim())
+    .filter((line) => line.length >= 30)
+    .slice(0, 12)
+    .map((line) => {
+      const sourceIds = extractCitedSourceIds(line).filter((id) => allowedSourceIds.has(id));
+      const lower = line.toLowerCase();
+      const hasInferenceLanguage = ['inferred', 'likely', 'may ', 'could ', 'appears', 'suggests'].some((needle) => lower.includes(needle));
+
+      return {
+        text: line.replace(/\s+/g, ' '),
+        basis: sourceIds.length > 0
+          ? (hasInferenceLanguage ? 'mixed' : 'sourced')
+          : 'inferred',
+        sourceIds,
+      };
+    });
 }
 
 function extractSection(text, keywords) {
@@ -833,7 +1193,9 @@ module.exports = router;
 module.exports.__test__ = {
   parseAnalysisResponse,
   parseStructuredSections,
+  parseStructuredPayload,
   extractJsonCandidate,
   extractSectionsFromMarkdown,
   buildRawAnalysisFromSections,
+  assessAnalysisQuality,
 };

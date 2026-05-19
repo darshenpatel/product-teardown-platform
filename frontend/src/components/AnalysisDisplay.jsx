@@ -1,6 +1,15 @@
 import { useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import FeedbackWidget from './FeedbackWidget'
+import { buildAnalysisMarkdown, downloadMarkdown, getMarkdownFilename } from '../utils/markdownExport'
+
+const FOCUS_PRESET_LABELS = {
+  general: 'General teardown',
+  onboarding: 'Onboarding & activation',
+  pricing: 'Pricing & packaging',
+  positioning: 'Positioning & differentiation',
+  growth: 'Growth opportunities',
+}
 
 export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnalysis }) {
   const { product_name, product_url, user_goals, ai_provider, analysis_data, created_at } = analysis
@@ -162,6 +171,9 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
     const viewingOriginal = Boolean(showOriginalSections[sectionKey]) && edited && !isEditing
     const originalContent = originalSections?.[sectionKey]
     const displayContent = viewingOriginal ? (originalContent || content) : content
+    const claims = Array.isArray(evidence?.claims) ? evidence.claims : []
+    const sourcedClaims = claims.filter((claim) => claim.basis === 'sourced' || claim.basis === 'mixed').length
+    const inferredClaims = claims.filter((claim) => claim.basis === 'inferred').length
     
     return (
       <div className="ptp-card ptp-card-hover mb-4">
@@ -178,6 +190,11 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
           <div className="flex items-center gap-2">
             {evidence && (
               <EvidenceBadge basis={evidence.basis} confidence={evidence.confidence} />
+            )}
+            {claims.length > 0 && (
+              <span className="hidden sm:inline-flex items-center px-2.5 py-1 rounded-full text-xs font-medium border bg-zinc-50 text-zinc-700 border-zinc-200">
+                {sourcedClaims} sourced / {inferredClaims} inferred
+              </span>
             )}
             {edited && (
               <span className="ptp-pill bg-zinc-50 text-zinc-700 border-zinc-200/70">
@@ -580,6 +597,45 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
     return takeaways.slice(0, 3) // Top 3 insights
   }
 
+  const getSummaryTakeaways = () => {
+    const topTakeaways = analysis_data?.summary?.topTakeaways
+    if (!Array.isArray(topTakeaways)) return []
+
+    return topTakeaways
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .slice(0, 3)
+  }
+
+  const keyTakeaways = getSummaryTakeaways()
+  const displayedTakeaways = keyTakeaways.length > 0
+    ? keyTakeaways
+    : extractKeyTakeaways(analysis_data.sections)
+
+  const qualityWarnings = Array.isArray(analysis_data?.quality?.warnings)
+    ? analysis_data.quality.warnings.filter(Boolean)
+    : []
+  const qualityGaps = Array.isArray(analysis_data?.quality?.evidenceGaps)
+    ? analysis_data.quality.evidenceGaps.filter(Boolean)
+    : []
+  const hasQualityNotes = qualityWarnings.length > 0 || qualityGaps.length > 0
+  const diagnostics = analysis_data?.diagnostics
+  const focusPresetLabel = FOCUS_PRESET_LABELS[analysis?.focus_preset]
+  const formatDuration = (ms) => {
+    if (typeof ms !== 'number' || Number.isNaN(ms)) return null
+    if (ms < 1000) return `${Math.round(ms)}ms`
+    return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`
+  }
+  const markdownExport = buildAnalysisMarkdown(analysis)
+
+  const copyMarkdown = () => {
+    navigator.clipboard.writeText(markdownExport)
+  }
+
+  const exportMarkdown = () => {
+    downloadMarkdown(markdownExport, getMarkdownFilename(analysis))
+  }
+
   return (
     <div className="max-w-4xl mx-auto">
       {/* Header */}
@@ -613,16 +669,54 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
           </button>
         </div>
         
-        {user_goals && (
+        {(focusPresetLabel || user_goals) && (
           <div className="mb-4">
             <h4 className="font-medium text-gray-900 mb-2">Analysis Focus:</h4>
-            <p className="text-gray-700 text-sm bg-gray-50 p-3 rounded">{user_goals}</p>
+            <div className="text-gray-700 text-sm bg-gray-50 p-3 rounded space-y-1">
+              {focusPresetLabel && (
+                <p><span className="font-medium">Preset:</span> {focusPresetLabel}</p>
+              )}
+              {user_goals && (
+                <p>{user_goals}</p>
+              )}
+            </div>
           </div>
         )}
         
         <p className="text-sm text-gray-500">
-          Generated on {formatDate(created_at)} using {ai_provider === 'anthropic' ? 'Claude Sonnet 4' : 'GPT-4o'}
+          Generated on {formatDate(created_at)} using {analysis_data?.model || ai_provider || 'AI model'}
         </p>
+
+        <div className="mt-3 flex flex-wrap gap-2 text-xs text-zinc-600">
+          <span className="ptp-pill bg-zinc-50 text-zinc-700 border-zinc-200/70">
+            Provider: {diagnostics?.provider || ai_provider || 'unknown'}
+          </span>
+          {(diagnostics?.model || analysis_data?.model) && (
+            <span className="ptp-pill bg-zinc-50 text-zinc-700 border-zinc-200/70">
+              Model: {diagnostics?.model || analysis_data.model}
+            </span>
+          )}
+          {typeof diagnostics?.generationTimeMs === 'number' && (
+            <span className="ptp-pill bg-zinc-50 text-zinc-700 border-zinc-200/70">
+              Generation: {formatDuration(diagnostics.generationTimeMs)}
+            </span>
+          )}
+          {typeof diagnostics?.sourceCount === 'number' && (
+            <span className="ptp-pill bg-zinc-50 text-zinc-700 border-zinc-200/70">
+              Sources: {diagnostics.sourceCount}
+            </span>
+          )}
+          {typeof diagnostics?.retryCount === 'number' && (
+            <span className={`ptp-pill ${diagnostics.retryCount > 0 ? 'bg-amber-50 text-amber-800 border-amber-200' : 'bg-zinc-50 text-zinc-700 border-zinc-200/70'}`}>
+              Retries: {diagnostics.retryCount}
+            </span>
+          )}
+          {typeof diagnostics?.qualityPassed === 'boolean' && (
+            <span className={`ptp-pill ${diagnostics.qualityPassed ? 'bg-emerald-50 text-emerald-800 border-emerald-200' : 'bg-amber-50 text-amber-800 border-amber-200'}`}>
+              Quality: {diagnostics.qualityPassed ? 'passed' : 'review'}
+            </span>
+          )}
+        </div>
 
         {analysis_data?.evidence?.overall && (
           <div className="mt-4 flex flex-col gap-2">
@@ -648,6 +742,35 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
                     <li key={idx}>{item}</li>
                   ))}
                 </ul>
+              </details>
+            )}
+            {hasQualityNotes && (
+              <details className="text-sm text-gray-600">
+                <summary className="cursor-pointer hover:text-gray-900">
+                  View quality notes
+                </summary>
+                <div className="mt-2 space-y-3">
+                  {qualityGaps.length > 0 && (
+                    <div>
+                      <div className="font-medium text-gray-800">Evidence gaps</div>
+                      <ul className="mt-1 list-disc ml-6 space-y-1">
+                        {qualityGaps.slice(0, 8).map((item, idx) => (
+                          <li key={`gap-${idx}`}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  {qualityWarnings.length > 0 && (
+                    <div>
+                      <div className="font-medium text-gray-800">Quality warnings</div>
+                      <ul className="mt-1 list-disc ml-6 space-y-1">
+                        {qualityWarnings.slice(0, 8).map((item, idx) => (
+                          <li key={`warning-${idx}`}>{item}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
               </details>
             )}
           </div>
@@ -725,7 +848,7 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
         </div>
         
         <div className="space-y-3">
-          {extractKeyTakeaways(analysis_data.sections).map((takeaway, index) => (
+          {displayedTakeaways.map((takeaway, index) => (
             <div key={index} className="flex items-start">
               <div className="flex-shrink-0 w-6 h-6 bg-emerald-600 text-white rounded-full flex items-center justify-center text-sm font-medium mr-3 mt-0.5">
                 {index + 1}
@@ -801,17 +924,13 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
       <div className="ptp-card p-6 mb-6">
         <div className="flex flex-col sm:flex-row gap-3 justify-center">
           <button
-            onClick={() => {
-              const analysisText = `${product_name} Analysis\n\n${extractKeyTakeaways(analysis_data.sections).map((t, i) => `${i+1}. ${t}`).join('\n')}\n\n${Object.entries(analysis_data.sections || {}).map(([key, content]) => `${key.toUpperCase()}:\n${content}`).join('\n\n')}`
-              navigator.clipboard.writeText(analysisText)
-              // Could add toast notification here
-            }}
+            onClick={copyMarkdown}
             className="ptp-btn-secondary px-6 py-2 flex items-center justify-center"
           >
             <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
             </svg>
-            Copy Analysis
+            Copy Markdown
           </button>
           
           <button
@@ -825,13 +944,13 @@ export default function AnalysisDisplay({ analysis, onNewAnalysis, onUpdateAnaly
           </button>
           
           <button
-            onClick={() => window.print()}
+            onClick={exportMarkdown}
             className="ptp-btn-secondary px-6 py-2 flex items-center justify-center"
           >
             <svg className="w-4 h-4 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 17h2a2 2 0 002-2v-4a2 2 0 00-2-2H5a2 2 0 00-2 2v4a2 2 0 002 2h2m2 4h6a2 2 0 002-2v-4a2 2 0 00-2-2H9a2 2 0 00-2 2v4a2 2 0 002 2zm8-12V5a2 2 0 00-2-2H9a2 2 0 00-2 2v4h10z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 7H7a2 2 0 01-2-2V6a2 2 0 012-2h5l5 5v9a2 2 0 01-2 2z" />
             </svg>
-            Print/PDF
+            Export Markdown
           </button>
         </div>
       </div>

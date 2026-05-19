@@ -51,6 +51,12 @@ Optional Turnstile keys:
 - Backend: `TURNSTILE_SECRET_KEY`
 - Frontend: `VITE_TURNSTILE_SITE_KEY`
 
+Optional model overrides:
+
+- Backend OpenAI default: `OPENAI_MODEL=gpt-5.2`
+- Backend Anthropic default: `ANTHROPIC_MODEL=claude-opus-4-1-20250805`
+- If your account has access to a newer private/beta model, set the exact model ID in `.env`.
+
 Optional local persistence override:
 
 - Backend: `PTP_DATA_DIR`

@@ -1,0 +1,6 @@
+{
+  "name": "Weak generic teardown",
+  "expectedPassed": false,
+  "sources": [{ "id": "src_1", "url": "https://example.com", "type": "homepage" }],
+  "analysisText": "{\"sections\":{\"onboarding\":\"**Onboarding Flow**\\n- To analyze onboarding, review the signup flow.\",\"pricing\":\"**Pricing Model**\\n- Analysis content available.\",\"valueProps\":\"**Primary Value**\\n- A specific strength of the product.\",\"competitive\":\"**Strengths**\\n- Another specific strength.\",\"actionPlan\":\"**Experiments to run**\\n- Test something.\",\"deltaVsMyProduct\":\"\"}}"
+}
